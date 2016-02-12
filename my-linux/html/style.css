@@ -1,0 +1,47 @@
+pre, code {font-size: 10px}
+
+.block-graph {text-align: center; white-space: nowrap;}
+.block-graph div {padding: 0;}
+
+.bord-black {border: 2px solid black}
+.bord-rgt-black {border-right: 2px solid black}
+.bord-top-black {border-top: 2px solid black}
+.bord-rgt-gray {border-right: 1px solid #ccc;}
+.bord-top-gray {border-top: 1px solid #ccc}
+
+.h100p {height: 100%;}
+.h10p {height: 10%}
+.h40p {height: 40%}
+.h50p {height: 50%}
+.h60p {height: 60%}
+
+.bg-gray {background-color: #ccc; color: green}
+
+.h50 {height: 50px; line-height: 50px;}
+.text-sm {font-size: 10px}
+
+.text-gray {color:#ccc}
+.text-red {color:red}
+
+.text-lg {font-size: 1.25em}
+
+.text-rgt {text-align: right}
+
+
+.mar-all {margin: 15px}
+.mar-top {margin-top:15px}
+.mar-btm {margin-bottom: 15px}
+.mar-lft {margin-left: 15px}
+
+.pad-all {padding: 15px}
+
+
+#pagetable, .pagetable {
+    height: 400px;
+    overflow: auto;
+}
+
+.maxh-400 {
+    max-height: 400px;
+    overflow: auto;
+}

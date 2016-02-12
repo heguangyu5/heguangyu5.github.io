@@ -1,0 +1,6 @@
+<?php
+
+return array(
+    array(0x10,  0x9a),
+    array(0x100, 0x1000)
+);
