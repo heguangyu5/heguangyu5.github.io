@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="container">
+
+
+
+
+
+
+
+<h1 class="page-header">编译内核 <small><a href="https://cdn.kernel.org/pub/linux/kernel/v2.6/linux-2.6.39.tar.xz">https://cdn.kernel.org/pub/linux/kernel/v2.6/linux-2.6.39.tar.xz</a></small></h1>
+
+<h3>1. 生成.config并编译</h3>
+<p>
+linux内核有数千个编译配置选项,以致于管理这些配置项都需要写个程序来管理了.<br>
+管理配置项的程序有好几个, <code>make menuconfig</code> 就是其中一个.<br>
+他们最终的目的就是生成一个.config文件.<br>
+<br>
+在我的电脑上,执行 <code>make menuconfig</code> 后,什么选项都不更改,直接退出,就得到了这样一个.config文件.<br>
+<a href="../.config" target="_blank"><i class="glyphicon glyphicon-download"></i> Download .config</a><br>
+把这个.config文件copy到linux源码目录,执行 <code>make</code> 命令,然后等上好一段时间,编译就完成了.
+</p>
+
+<pre><code class="language-bash">cp .config /path/to/linux-2.6.39/
+cd /path/to/linux-2.6.39
+make
+</code></pre>
+
+<h3>2. 几个重要的编译结果</h3>
+<table class="table table-bordered">
+    <tr>
+        <th>文件名</th>
+        <th width="10%">大小</th>
+        <th>怎么来的</th>
+    </tr>
+    <tr>
+        <td>vmlinux</td>
+        <td>141438505</td>
+        <td>
+            gcc编译,只不过用了自己的链接脚本 arch/x86/kernel/vmlinux.lds.S<br>
+            这是一个标准的ELF文件, <code>readelf -h -S vmlinux</code> 可以查看ELF Header及Section Headers
+        </td>
+    </tr>
+    <tr>
+        <td><a href="../System.map" target="_blank"><i class="glyphicon glyphicon-download"></i> System.map</a></td>
+        <td>这个文件的大小我们不关心</td>
+        <td>
+            这个文件非常有用,它记录着函数,变量的内存地址<br>
+            <code>readelf -s vmlinux</code> 也可以拿到vmlinux的symbol table<br>
+            不过这个System.map是由 <code>scripts/mksysmap</code> 这个脚本生成的.
+        </td>
+    </tr>
+    <tr>
+        <td>arch/x86/boot/compressed/vmlinux.bin</td>
+        <td>18545760</td>
+        <td>
+            <code>objcopy -R .comment -S vmlinux arch/x86/boot/compressed/vmlinux.bin</code><br>
+            @see arch/x86/boot/compressed/.vmlinux.bin.cmd
+        </td>
+    </tr>
+    <tr>
+        <td>arch/x86/boot/compressed/vmlinux.bin.gz</td>
+        <td>4559912</td>
+        <td>
+            <code>cat vmlinux.bin | gzip -f -9 > vmlinux.bin.gz</code><br>
+            @see arch/x86/boot/compressed/.vmlinux.bin.gz.cmd
+        </td>
+    </tr>
+    <tr>
+        <td>arch/x86/boot/compressed/piggy.S</td>
+        <td>这个文件的大小我们不关心</td>
+        <td>
+            <code>mkpiggy vmlinux.bin.gz</code><br>
+            前边生成的vmlinux.bin.gz被include到了这个文件里<br>
+            <pre class="line-numbers" data-start="10"><code class="language-bash">.globl input_data, input_data_end
+input_data:
+.incbin "arch/x86/boot/compressed/vmlinux.bin.gz"
+input_data_end:</code></pre>
+        </td>
+    </tr>
+    <tr>
+        <td>arch/x86/boot/compressed/vmlinux</td>
+        <td>6681360</td>
+        <td>
+            <code>ld -m elf_x86_64 -T vmlinux.lds head_64.o misc.o string.o cmdline.o early_serial_console.o piggy.o -o vmlinux</code><br>
+            @see arch/x86/boot/compressed/.vmlinux.cmd
+        </td>
+    </tr>
+    <tr>
+        <td>arch/x86/boot/vmlinux.bin</td>
+        <td>4579584</td>
+        <td>
+            <code>objcopy -O binary -R .note -R .comment -S compressed/vmlinux vmlinux.bin</code><br>
+            @see arch/x86/boot/.vmlinux.bin.cmd
+        </td>
+    </tr>
+    <tr>
+        <td>arch/x86/boot/setup.bin</td>
+        <td>16620</td>
+        <td>
+            objcopy setup.elf 而来, 这个文件我们不太关心<br>
+            @see arch/x86/boot/.setup.elf.cmd<br>
+            @see arch/x86/boot/.setup.bin.cmd
+        </td>
+    </tr>
+    <tr>
+        <td><a href="../bzImage" target="_blank"><i class="glyphicon glyphicon-download"></i> arch/x86/boot/bzImage</a></td>
+        <td>4596496</td>
+        <td>
+            <code>tools/build setup.bin vmlinux.bin CURRENT > bzImage</code><br>
+            @see arch/x86/boot/.bzImage.cmd
+        </td>
+    </tr>
+</table>
+
+<h3>3. bzImage构成分析(tools/build.c解读)</h3>
+<p>
+    build.c 的作用是把 setup.bin 和 vmlinux.bin 合成一个 bzImage. <br>
+    合成前,需要计算出几个值,覆盖掉 setup.bin 里的默认值. <br>
+    setup.bin的前两个sector(共1K)的内容是由 header.S 生成的, 链接脚本是 setup.ld <br>
+    自己写过bootloader的话能很容易看明白 header.S 这段程序.
+</p>
+
+<h4>需要计算的几个值:</h4>
+<ol>
+    <li>
+        ROOT Device Number: 我们可以通过 <code class="language-bash">stat /</code> 取得. 由于我们的.config 里配置了<br>
+        <pre class="line-numbers" data-start="148"><code class="language-bash">CONFIG_BLK_DEV_INITRD=y</code></pre>
+        也就是说系统启动需要一个initrd image, 而GRUB加载initrd的话,会把ROOT Device Number重设为一个固定值,所以这个值在这里就无所谓了<br>
+        不过当我们使用hexdump验证bzImage时,知道这个值还是有帮助的.
+    </li>
+    <li>setup.bin的大小占用几个sector, 它的大小前边我们已经知道了, 占用的sector数可以很容易计算出来.</li>
+    <li>arch/x86/boot/vmlinux.bin的大小,这次不是计算占用多少个sector,而是看有多少个16字节,计算时要多出4个字节再计算,因为要在最后放个CRC32校验值,占4个字节</li>
+</ol>
+
+
+<h4>值计算好后,写入setup.bin</h4>
+从setup.ld里得知 .header 在 offset 497.
+<pre class="line-numbers" data-start="10"><code class="language-bash">SECTIONS
+{
+	. = 0;
+	.bstext		: { *(.bstext) }
+	.bsdata		: { *(.bsdata) }
+
+	. = 497;
+	.header		: { *(.header) }
+</code></pre>
+对应 header.S
+<pre class="line-numbers" data-start="94"><code class="language-bash">	.section ".header", "a"
+	.globl	hdr
+hdr:
+setup_sects:	.byte 0			/* Filled in by build.c */      # offset 497 (0x1f1)
+root_flags:	.word ROOT_RDONLY                                   # offset 498,499 (0x1f2, 0x1f3)
+syssize:	.long 0			/* Filled in by build.c */          # offset 500,501,502,503 (0x1f4, 0x1f5, 0x1f6, 0x1f7)
+ram_size:	.word 0			/* Obsolete */                      # offset 504, 505
+vid_mode:	.word SVGA_MODE                                     # offset 506, 507
+root_dev:	.word 0			/* Filled in by build.c */          # offset 508, 509
+boot_flag:	.word 0xAA55</code></pre>
+对应build.c
+<pre class="line-numbers" data-start="195"><code class="language-c">     /* Set the default root device */
+     buf[508] = minor_root;
+     buf[509] = major_root;
+</code></pre>
+<pre class="line-numbers" data-start="215"><code class="language-c">     /* Patch the setup code with the appropriate size parameters */
+     buf[0x1f1] = setup_sectors-1;
+     buf[0x1f4] = sys_size;
+     buf[0x1f5] = sys_size >> 8;
+     buf[0x1f6] = sys_size >> 16;
+     buf[0x1f7] = sys_size >> 24;
+</code></pre>
+
+
+<h4>合并生成bzImage</h4>
+<p>
+首先写入setup.bin,前边我们已经计算好了它要占几个sector,setup.bin不会恰好占满这多么sector,余下的字节以0填充.<br>
+写入vmlinux.bin,前边我们已经计算好了它要占多少个16字节,vmlinux.bin也不会恰好占满这多么个16字节,保留最后4个字节,其它字节以0填充.<br>
+计算setup.bin + padded zero + vmlinux.bin + padded zero 的CRC32检验值,结果写到最后,占4个字节.<br>
+OK, bzImage就这样生成了.
+</p>
+
+<div class="row mar-all h50 bord-black block-graph">
+    <div class="col-xs-3 h100p bord-rgt-black">
+        <div class="col-xs-9 h100p bord-rgt-gray">setup.bin</div>
+        <div class="col-xs-3 h100p text-sm text-gray">padded zero</div>
+    </div>
+    <div class="col-xs-9 h100p">
+        <div class="col-xs-9 h100p bord-rgt-gray">vmlinux.bin</div>
+        <div class="col-xs-2 h100p bord-rgt-gray text-sm text-gray">padded zero</div>
+        <div class="col-xs-1 h100p text-sm text-gray">crc32</div>
+    </div>
+</div>
+
+<h4>一个php版的build.c</h4>
+<a href="../tools/build.php" target="_blank"><i class="glyphicon glyphicon-download"></i> Download build.php</a>
+
+<h4>crc32</h4>
+<a href="../tools/crc32" target="_blank"><i class="glyphicon glyphicon-download"></i> Download crc32</a>
+<a href="../tools/crc32.c" target="_blank"><i class="glyphicon glyphicon-download"></i> Download crc32.c</a>
+
+<h4>验证</h4>
+<pre><code class="language-bash">stat -c %D /
+803
+
+php build.php ../../linux-2.6.39/arch/x86/boot/setup.bin ../../linux-2.6.39/arch/x86/boot/vmlinux.bin 3 8
+setup.bin padded zeros: 276
+vmlinux.bin padded zeros: 12
+
+./crc32 /tmp/bzImage.pad
+bzImage.pad size = 4596492
+crc32 bzImage.pad = 5fcb720e
+</code></pre>
+
+<div class="row">
+    <div class="col-xs-6">/tmp/bzImage.pad</div>
+    <div class="col-xs-6">arch/x86/boot/bzImage</div>
+</div>
+<div class="row">
+    <div class="col-xs-6">
+        <pre><code class="language-bash"># root_dev
+hexdump -C -n 2 -s 508 /tmp/bzImage.pad
+000001fc  03 08                                             |..|
+
+# setup_sects
+hexdump -C -n 1 -s 497 /tmp/bzImage.pad
+000001f1  20                                                | |
+
+# sys_size
+hexdump -C -n 4 -s 500 /tmp/bzImage.pad
+000001f4  11 5e 04 00                                       |.^..|
+
+# setup.bin padded zeros
+hexdump -C -n $((16+276+16)) -s $((16620-16)) /tmp/bzImage.pad
+000040dc  2b 00 00 00 00 0f 50 00  19 00 00 00 55 aa 5a 5a  |+.....P.....U.ZZ|
+000040ec  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  |................|
+*
+000041fc  00 00 00 00 fc f6 86 11  02 00 00 40 75 0c fa b8  |...........@u...|
+0000420c  18 00 00 00                                       |....|
+
+# vmlinux.bin padded zeros
+hexdump -C -n 512 -s $(((16620+511)/512*512+4579584-16)) /tmp/bzImage.pad
+004622f0  00 00 00 00 00 89 80 00  00 00 00 00 00 00 00 00  |................|
+00462300  00 00 00 00 00 00 00 00  00 00 00 00              |............|
+        </code></pre>
+    </div>
+    <div class="col-xs-6">
+        <pre><code class="language-bash"># root_dev
+hexdump -C -n 2 -s 508 bzImage
+000001fc  03 08                                             |..|
+
+# setup_sects
+hexdump -C -n 1 -s 497 bzImage
+000001f1  20                                                | |
+
+# sys_size
+hexdump -C -n 4 -s 500 bzImage
+000001f4  11 5e 04 00                                       |.^..|
+
+# setup.bin padded zeros
+hexdump -C -n $((16+276+16)) -s $((16620-16)) bzImage
+000040dc  2b 00 00 00 00 0f 50 00  19 00 00 00 55 aa 5a 5a  |+.....P.....U.ZZ|
+000040ec  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  |................|
+*
+000041fc  00 00 00 00 fc f6 86 11  02 00 00 40 75 0c fa b8  |...........@u...|
+0000420c  18 00 00 00                                       |....|
+
+# vmlinux.bin padded zeros
+hexdump -C -n 512 -s $(((16620+511)/512*512+4579584-16)) bzImage
+004622f0  00 00 00 00 00 89 80 00  00 00 00 00 00 00 00 00  |................|
+00462300  00 00 00 00 00 00 00 00  00 00 00 00 0e 72 cb 5f  |.............r._|
+        </code></pre>
+    </div>
+</div>
+
+
+<h3>4. 参考资料</h3>
+<ul>
+    <li><a href="https://en.wikipedia.org/wiki/Gzip" target="_blank">https://en.wikipedia.org/wiki/Gzip</a></li>
+    <li><a href="https://tools.ietf.org/html/rfc1952" target="_blank">https://tools.ietf.org/html/rfc1952</a></li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</div>
+<script src="prism.js"></script>
+</body>
+</html>
