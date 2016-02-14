@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="container">
+
+
+
+
+
+
+
+<h1 class="page-header">制作disk</h1>
+
+<p class="lead bg-primary pad-all">
+@see http://wiki.osdev.org/GRUB_2 <br>
+@see http://my-zhang.github.io/blog/2014/06/28/make-bootable-linux-disk-image-with-grub2/
+</p>
+
+<h3>1. grub.cfg</h3>
+<pre><code class="language-bash">menuentry "bzImage" {
+    linux /bzImage
+    initrd /initrd.img.gz
+    boot
+}</code></pre>
+
+<h3>2. device.map</h3>
+<pre><code class="language-bash">(hd0) /dev/loop0
+(hd0,1) /dev/loop1</code></pre>
+
+<h3>3. disk</h3>
+<pre><code class="language-bash">bximage -mode=create -hd=500M -q my-linux.img
+# The following line should appear in your bochsrc:
+#  ata0-master: type=disk, path="my-linux.img", mode=flat
+sudo losetup /dev/loop0 my-linux.img
+sudo gparted /dev/loop0
+# create an MS-DOS partition table
+# create primary partition ext2
+sudo fdisk -l /dev/loop0
+#       Device Boot      Start         End      Blocks   Id  System
+# /dev/loop0p1            2048     1021951      509952   83  Linux
+# 注意 Start = 2048 = 512 * 2048 = 1M
+sudo losetup -o $((512*2048)) /dev/loop1 my-linux.img
+sudo mount /dev/loop1 /mnt
+sudo mkdir -p /mnt/boot/grub/
+sudo cp device.map /mnt/boot/grub/
+sudo grub-install --root-directory=/mnt --grub-mkdevicemap=/mnt/boot/grub/device.map --no-floppy /dev/loop0
+sudo cp grub.cfg /mnt/boot/grub/
+sudo cp bzImage /mnt/
+sudo cp initrd.img.gz /mnt/
+sync
+sudo umount /mnt/
+sudo losetup -d /dev/loop0 /dev/loop1
+</code></pre>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</div>
+<script src="prism.js"></script>
+</body>
+</html>
