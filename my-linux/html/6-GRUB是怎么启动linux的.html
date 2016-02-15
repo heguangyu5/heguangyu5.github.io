@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="container">
+
+
+
+
+
+
+
+<h1 class="page-header">GRUB是怎么启动linux的?</h1>
+
+<h3>1. Get GRUB source code</h3>
+<pre><code class="language-bash">apt-get source grub2
+# grub2-1.99/grub-core/loader/i386/linux.c
+# grub2-1.99/include/grub/i386/linux.h</code></pre>
+
+
+<h3>2. grub_cmd_linux <small>linux /bzImage @see grub.cfg</small></h3>
+
+<div class="row mar-all text-gray">
+    <div class="col-xs-6">0x1000 4K</div>
+    <div class="col-xs-6">0x1000 4K</div>
+</div>
+<div class="row mar-all h50 bord-black graph-block">
+    <div class="col-xs-6 h100p bord-rgt-black">
+        <div class="col-xs-2 h100p bord-rgt-gray">0-0x1f1</div>
+        <div class="col-xs-3 h100p bord-rgt-gray">kernel_header</div>
+        <div class="col-xs-5 h100p bord-rgt-gray">e820_map</div>
+        <div class="col-xs-2 h100p"></div>
+    </div>
+    <div class="col-xs-6 h100p">BOOT_IMAGE=/bzImage</div>
+</div>
+<p class="lead bg-primary pad-all">
+GRUB先读取kernel_header,做一些验证,根据setup_sects计算出prot_size.<br>
+然后预留8K做real_mode_mem, 这8K的后4K是留给grub.cfg里linux命令后的参数的,前4K是留给kernel_params的.<br>
+prot_size page_align后分配出 prot_mode_mem. 后边把文件读取位置移到vmlinux.bin的开头,直接把vmlinux.bin + padded zeros + CRC32读到prot_mode_mem里.<br>
+先读取的kernel_header被复制到kernel_params里,setup.bin的前2个sector还没被读取的部分也被读取到kernel_params里.
+</p>
+
+<div class="row">
+    <div class="col-xs-6">
+        <pre><code class="language-c">  file = grub_file_open (argv[0]);
+  if (! file)
+    goto fail;
+
+// 读取 kernel header
+  if (grub_file_read (file, &lh, sizeof (lh)) != sizeof (lh))
+    {
+      grub_error (GRUB_ERR_READ_ERROR, "cannot read the Linux header");
+      goto fail;
+    }
+// 验证 boot_flag
+  if (lh.boot_flag != grub_cpu_to_le16 (0xaa55))
+    {
+      grub_error (GRUB_ERR_BAD_OS, "invalid magic number");
+      goto fail;
+    }
+// 验证 setup_sects
+// 我们在生成bzImage时计算了setup_sects = 0x20
+// GRUB_LINUX_MAX_SETUP_SECTS = 64
+  if (lh.setup_sects > GRUB_LINUX_MAX_SETUP_SECTS)
+    {
+      grub_error (GRUB_ERR_BAD_OS, "too many setup sectors");
+      goto fail;
+    }
+// 验证 loadflags, header.S 里默认值为 LOADED_HIGH = 1, 就是这个 BIG_KERNEL_FLAG
+// GRUB_LINUX_FLAG_BIG_KERNEL = 0x1
+  if (! (lh.loadflags & GRUB_LINUX_FLAG_BIG_KERNEL))
+    {
+      grub_error (GRUB_ERR_BAD_OS, "zImage doesn't support 32-bit boot"
+#ifdef GRUB_MACHINE_PCBIOS
+		  " (try with `linux16')"
+#endif
+		  );
+      goto fail;
+    }
+// 验证 signature ("HdrS") 和 version (0x020a)
+// GRUB_LINUX_MAGIC_SIGNATURE = 0x53726448 = HdrS
+  if (lh.header != grub_cpu_to_le32 (GRUB_LINUX_MAGIC_SIGNATURE)
+      || grub_le_to_cpu16 (lh.version) < 0x0203)
+    {
+      grub_error (GRUB_ERR_BAD_OS, "version too old for 32-bit boot"
+#ifdef GRUB_MACHINE_PCBIOS
+		  " (try with `linux16')"
+#endif
+		  );
+      goto fail;
+    }
+// GRUB_DISK_SECTOR_BITS = 9 (1 << 9 = 512)
+// real_size = setup_sects * 512 (setup.bin的size减去boot sector)
+// prot_size = bzImage size - setup.bin size = vmlinux.bin size + padded zeros + CRC32
+//           = 0x45e11 * 16 = 0x45e110
+  real_size = setup_sects << GRUB_DISK_SECTOR_BITS;
+  prot_size = grub_file_size (file) - real_size - GRUB_DISK_SECTOR_SIZE;
+
+  if (allocate_pages (prot_size))
+    goto fail;
+</code></pre>
+
+<pre><code class="language-c">#define GRUB_LINUX_CL_OFFSET		0x1000
+#define GRUB_LINUX_CL_END_OFFSET	0x2000
+#define GRUB_LINUX_BZIMAGE_ADDR		0x100000
+
+static grub_err_t allocate_pages (grub_size_t prot_size) {
+  real_size = GRUB_LINUX_CL_END_OFFSET; // 0x2000 = 8K
+  prot_size = page_align (prot_size);   // 0x45e110 => 0x45f000
+
+  real_mode_target < 0x90000
+  prot_mode_target = GRUB_LINUX_BZIMAGE_ADDR; // 0x100000 = 1M
+}</code></pre>
+    </div>
+    <div class="col-xs-6">
+        <pre><code class="language-c">// @see linux-2.6.39/arch/x86/boot/header.S
+/* For the Linux/i386 boot protocol version 2.03.  */
+struct linux_kernel_header
+{
+  grub_uint8_t code1[0x0020];
+  grub_uint16_t cl_magic;
+  grub_uint16_t cl_offset;
+  grub_uint8_t code2[0x01F1 - 0x0020 - 2 - 2];
+/******************************************************************************/
+/***************************  分割线  ******************************************/
+/******************************************************************************/
+  grub_uint8_t setup_sects;         // 0x20            "hdr" start here
+  grub_uint16_t root_flags;         // ROOT_RDONLY
+  grub_uint16_t syssize;            // 0x00045e11      这个syssize应该是个uint32
+  grub_uint16_t swap_dev;
+  grub_uint16_t ram_size;           // 0
+  grub_uint16_t vid_mode;           // SVGA_MODE
+  grub_uint16_t root_dev;           // 0x0803
+  grub_uint16_t boot_flag;          // 0xaa55
+  grub_uint16_t jump;               // jmp start_of_setup "_start" start here
+  grub_uint32_t header;             // "HdrS"
+  grub_uint16_t version;            // 0x020a
+  grub_uint32_t realmode_swtch;     // 0x00000000
+  grub_uint16_t start_sys;          // SYSSEG
+  grub_uint16_t kernel_version;     // kernel_version-512
+  grub_uint8_t type_of_loader;      // 0
+  grub_uint8_t loadflags;           // LOADED_HIGH      LOADED_HIGH=1 CAN_USE_HEAP=0x80
+  grub_uint16_t setup_move_size;    // 0x8000
+  grub_uint32_t code32_start;       // 0x100000 1M
+  grub_uint32_t ramdisk_image;      // 0
+  grub_uint32_t ramdisk_size;       // 0
+  grub_uint32_t bootsect_kludge;    // 0
+  grub_uint16_t heap_end_ptr;       // _end+STACK_SIZE-512
+  grub_uint16_t pad1;               // ext_loader_ver ext_loader_type
+  grub_uint32_t cmd_line_ptr;       // 0
+  grub_uint32_t initrd_addr_max;    // 0x7fffffff
+} __attribute__ ((packed));
+
+// 对比 header.S 我们知道, kernel header后边还有,不过GRUB就支持到这里</code></pre>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-xs-6">
+        <pre><code class="language-c">// 我们已经知道 real_mode_mem 大小是0x2000, 2个page, 8K
+// 这8K内存清0后,将前边读取的kernel header从setup_sects开始复制到params->setup_sects.
+// 也就是把已读取的setup.bin里有效的hdr部分复制过来了
+  params = (struct linux_kernel_params *) real_mode_mem;
+  grub_memset (params, 0, GRUB_LINUX_CL_END_OFFSET);
+  grub_memcpy (&amp;params->setup_sects, &lh.setup_sects, sizeof (lh) - 0x1F1);
+
+// 把 boot_flag 0xaa55 给置0了
+  params->ps_mouse = params->padding10 =  0;
+
+// 0x400 - sizeof(lh) 就是setup.bin的前2个sector里没有被读取的字节
+// 读取之后,setup.bin的前2个sector,共1K的内容都被读取到内存里了,不过只有从hdr开始到1K的
+// 部分才能在real_mode_mem里找到
+  len = 0x400 - sizeof (lh);
+  if (grub_file_read (file, (char *) real_mode_mem + sizeof (lh), len) != len)
+    {
+      grub_error (GRUB_ERR_FILE_READ_ERROR, "couldn't read file");
+      goto fail;
+    }
+
+// GRUB_LINUX_BOOT_LOADER_TYPE = 0x72
+  params->type_of_loader = GRUB_LINUX_BOOT_LOADER_TYPE;
+
+// real_mode_target共2个page,8K
+// 前1K已经被 kernel params 用了
+// cmd_line_ptr 放到了第2个page的开头
+  params->cmd_line_ptr = real_mode_target + 0x1000;
+  params->ramdisk_image = 0;
+  params->ramdisk_size = 0;
+
+// GRUB_LINUX_HEAP_END_OFFSET = (0x9000 - 0x200)
+  params->heap_end_ptr = GRUB_LINUX_HEAP_END_OFFSET;
+  params->loadflags |= GRUB_LINUX_FLAG_CAN_USE_HEAP;
+
+// GRUB_DISK_SECTOR_SIZE = 0x200 = 512
+// 准备开始读取vmlinux.bin了
+  grub_file_seek (file, real_size + GRUB_DISK_SECTOR_SIZE);
+
+// "linux /bzImage" argc = 1
+// 所以这个for就直接跳过了
+  for (i = 1; i < argc; i++);
+
+// GRUB_LINUX_CL_OFFSET => 0x1000
+// /include/grub/lib/cmdline.h: #define LINUX_IMAGE "BOOT_IMAGE="
+// GRUB为cmdline预留了4K大小,real_mode_mem的第2个page都是给cmdline的
+// 先把 BOOT_IMAGE= 给复制过去,再把grub.cfg里的linux命令的参数给复制过去,
+// 对我们来说,应该是 BOOT_IMAGE=/bzImage
+// 待后边验证一下
+  grub_memcpy ((char *)real_mode_mem + GRUB_LINUX_CL_OFFSET, LINUX_IMAGE,
+	      sizeof (LINUX_IMAGE));
+  grub_create_loader_cmdline (argc, argv,
+			      (char *)real_mode_mem + GRUB_LINUX_CL_OFFSET
+			      + sizeof (LINUX_IMAGE) - 1,
+			      GRUB_LINUX_CL_END_OFFSET - GRUB_LINUX_CL_OFFSET
+			      - (sizeof (LINUX_IMAGE) - 1));
+
+// 把vmlinux.bin + padded zeros + CRC32 全都读到 prot_mode_mem 里
+  len = prot_size;
+  if (grub_file_read (file, prot_mode_mem, len) != len)
+    grub_error (GRUB_ERR_FILE_READ_ERROR, "couldn't read file");
+    </code></pre>
+    </div>
+    <div class="col-xs-6">
+        <pre><code class="language-c">struct linux_kernel_params
+{
+  // ....
+  // 忽略,目前看起来没什么用
+  // ....
+
+  grub_uint8_t padding9[0x1f1 - 0x1e9];
+/******************************************************************************/
+/***************************  分割线  ******************************************/
+/******************************************************************************/
+  grub_uint8_t setup_sects;		    // 0x20
+  grub_uint16_t root_flags;		    // ROOT_RDONLY
+  grub_uint16_t syssize;		    // 0x00045e11
+  grub_uint16_t swap_dev;
+  grub_uint16_t ram_size;		    // 0
+  grub_uint16_t vid_mode;		    // SVGA_MODE
+  grub_uint16_t root_dev;		    // 0x0803
+
+  grub_uint8_t padding10;		    // 原来是boot_flag 0xaa55
+  grub_uint8_t ps_mouse;		    // 把kernel header复制过来后,置0了
+
+  grub_uint16_t jump;			    // jmp start_of_setup
+  grub_uint32_t header;			    // "HdrS"
+  grub_uint16_t version;		    // 0x020a
+  grub_uint32_t realmode_swtch;		// 0x00000000
+  grub_uint16_t start_sys;		    // SYSSEG
+  grub_uint16_t kernel_version;		// kernel_version-512
+  grub_uint8_t type_of_loader;		// 0 ===> 0x72
+  grub_uint8_t loadflags;		    // LOADED_HIGH LOADED_HIGH=1 CAN_USE_HEAP=0x80
+                                    // ===> LOADED_HIGH | CAN_USE_HEAP
+  grub_uint16_t setup_move_size;	// 0x8000
+  grub_uint32_t code32_start;		// 0x100000 1M
+  grub_uint32_t ramdisk_image;		// 0
+  grub_uint32_t ramdisk_size;		// 0
+  grub_uint32_t bootsect_kludge;	// 0
+  grub_uint16_t heap_end_ptr;		// _end+STACK_SIZE-512 ===> 0x9000 - 0x200
+  grub_uint16_t pad1;			    // ext_loader_ver ext_loader_type
+  grub_uint32_t cmd_line_ptr;		// 0 ===> real_mode_target + 0x1000
+
+  grub_uint8_t pad2[164];		/* 22c */
+  struct grub_e820_mmap e820_map[GRUB_E820_MAX_ENTRY];	/* 2d0 */
+
+} __attribute__ ((packed));</code></pre>
+    </div>
+</div>
+
+
+<h3>3. grub_cmd_initrd <small>linux /initrd.img.gz @see grub.cfg</small></h3>
+
+<div class="row mar-all text-gray">
+    <div class="col-xs-2"></div>
+    <div class="col-xs-3">1M</div>
+    <div class="col-xs-4"></div>
+    <div class="col-xs-2 text-rgt text-sm">896M或靠近内存末尾的地方</div>
+    <div class="col-xs-1"></div>
+</div>
+<div class="row mar-all h50 bord-black graph-block">
+    <div class="col-xs-2 h100p bord-rgt-black">real_mode_mem</div>
+    <div class="col-xs-3 h100p bord-rgt-gray">prot_mode_mem</div>
+    <div class="col-xs-4 h100p bord-rgt-black text-gray">free mem</div>
+    <div class="col-xs-2 h100p bord-rgt-gray">initrd_mem</div>
+    <div class="col-xs-1 h100p"></div>
+</div>
+
+<p class="lead bg-primary pad-all">
+在靠近896M或内存末尾的地方找一块内存,把initrd.img.gz读进来.<br>
+initrd.img.gz在内存里的位置和大小分别保存到lh->ramdisk_image lh->ramdisk_size 里<br>
+并且 root_dev 被固定的设为 0x0100
+</p>
+
+<div class="row">
+    <div class="col-xs-6">
+        <pre><code class="language-c">  file = grub_file_open (argv[0]);
+  if (! file)
+    goto fail;
+
+// 获取initrd.img.gz的大小并计算出占用几个page
+  size = grub_file_size (file);
+  initrd_pages = (page_align (size) >> 12);
+
+  lh = (struct linux_kernel_header *) real_mode_mem;
+
+// lh->version = 0x020a
+  if (grub_le_to_cpu16 (lh->version) >= 0x0203)
+    {
+// lh->initrd_addr_max = 0x7fffffff
+// GRUB_LINUX_INITRD_MAX_ADDRESS = 0x37FFFFFF
+// 最终 addr_max = 0x37FFFFFF = 896M
+      addr_max = grub_cpu_to_le32 (lh->initrd_addr_max);
+      if (addr_max > GRUB_LINUX_INITRD_MAX_ADDRESS)
+	addr_max = GRUB_LINUX_INITRD_MAX_ADDRESS;
+    }
+
+  /* Linux 2.3.xx has a bug in the memory range check, so avoid
+     the last page.
+     Linux 2.2.xx has a bug in the memory range check, which is
+     worse than that of Linux 2.3.xx, so avoid the last 64kb.  */
+  addr_max -= 0x10000;
+
+  /* Put the initrd as high as possible, 4KiB aligned.  */
+  addr = (addr_max - size) & ~0xFFF;
+
+// 在靠近896M(内存不够896M就是内存末尾了)的地方找一块内存放initrd.img.gz
+// 把initrd.img.gz读取到initrd_mem里
+  if (grub_file_read (file, initrd_mem, size) != size)
+    {
+      grub_error (GRUB_ERR_FILE_READ_ERROR, "couldn't read file");
+      goto fail;
+    }
+
+// 把initrd.img.gz在内存里的位置和大小分别保存到 lh->ramdisk_image 和 lh->ramdisk_size 里
+// 并置 lh->root_dev 为 0x0100, 原来是 0x0803
+  lh->ramdisk_image = initrd_mem_target;
+  lh->ramdisk_size = size;
+  lh->root_dev = 0x0100;</code></pre>
+    </div>
+</div>
+
+<h3>4. grub_linux_boot <small>boot @see grub.cfg</small></h3>
+
+<div class="row">
+    <div class="col-xs-6">
+        <pre><code class="language-c">// 填充 e820_map
+  auto int NESTED_FUNC_ATTR hook (grub_uint64_t, grub_uint64_t,
+				  grub_memory_type_t);
+  int NESTED_FUNC_ATTR hook (grub_uint64_t addr, grub_uint64_t size,
+			     grub_memory_type_t type)
+    {
+      switch (type)
+        {
+        case GRUB_MEMORY_AVAILABLE:
+	  grub_e820_add_region (params->e820_map, &e820_num,
+				addr, size, GRUB_E820_RAM);
+	  break;
+
+        case GRUB_MEMORY_ACPI:
+	  grub_e820_add_region (params->e820_map, &e820_num,
+				addr, size, GRUB_E820_ACPI);
+	  break;
+
+        case GRUB_MEMORY_NVS:
+	  grub_e820_add_region (params->e820_map, &e820_num,
+				addr, size, GRUB_E820_NVS);
+	  break;
+
+        case GRUB_MEMORY_BADRAM:
+	  grub_e820_add_region (params->e820_map, &e820_num,
+				addr, size, GRUB_E820_BADRAM);
+	  break;
+
+        default:
+          grub_e820_add_region (params->e820_map, &e820_num,
+                                addr, size, GRUB_E820_RESERVED);
+        }
+      return 0;
+    }
+
+  e820_num = 0;
+  grub_mmap_iterate (hook);
+
+// 填充 video params
+
+// 最终状态
+// %ebp = 0, %edi = 0, %ebx = 0
+// %esi, %esp 指向 real_mode_mem
+// %eip 指向 code32_start, 即 0x100000 = 1M, vmlinux.bin已被加载到这里
+  state.ebp = state.edi = state.ebx = 0;
+  state.esi = real_mode_target;
+  state.esp = real_mode_target;
+  state.eip = params->code32_start;
+        </code></pre>
+    </div>
+</div>
+
+<h3>5. 总结一下</h3>
+
+<p class="lead bg-primary pad-all">
+当cpu执行到内存1M处的指令时,GRUB已经结束了它的使命.<br>
+GRUB的工作结果有以下3个:<br>
+1. vmlinux.bin 已经被加载到1M处,cpu的eip指向这里,马上要执行 vmlinux.bin 的第一条指令了<br>
+2. real_mode_mem (kernel_params) 的位置保存在 %esi %esp 里<br>
+3. initrd.img.gz 在内存里的位置和大小保存到 kernel_params->ramdisk_image, ramdisk_size 里
+</p>
+
+验证:
+<pre><code class="language-bash"># bochs启动后, 在1M处设break point
+bochs -q
+# b 0x100000
+%esi = %esp = 0x8c800
+# View -> Physical MemDump -> 0x8c800
+# 现在先大概看一下就可以了,后边我们可以写个程序来检查内存里的内容</code></pre>
+
+
+
+</div>
+<script src="prism.js"></script>
+</body>
+</html>
