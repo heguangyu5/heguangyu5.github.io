@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="prism.css">
+<script src="jquery.min.js"></script>
+<script src="pagetable.js"></script>
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">
+    linux启动之进入C语言环境
+    <small>arch/x86/kernel/head_64.S</small>
+</h1>
+
+kernel对Virtual Address Space的基本规划:
+<p class="help-block">@see Documentation/x86/x86_64/mm.txt</p>
+<pre>ffff880000000000 - ffffc7ffffffffff (=64 TB) direct mapping of all phys. memory
+init_level4_pgt(272)->level3_ident_pgt(0)->level2_ident_pgt(512*2M=1G)
+
+ffffffff80000000 - ffffffffa0000000 (=512 MB) kernel text mapping, from phys 0
+init_level4_pgt(511)->level3_kernel_pgt(510)->level2_kernel_pgt(256*2M=512M)
+</pre>
+
+<p class="help-block">@see arch/x86/include/asm/page_64_types.h</p>
+<pre>#define __PAGE_OFFSET           _AC(0xffff880000000000, UL)
+#define __PHYSICAL_START        CONFIG_PHYSICAL_START // 0x1000000 = 16M
+
+#define __START_KERNEL_map  _AC(0xffffffff80000000, UL)
+#define __START_KERNEL      (__START_KERNEL_map + __PHYSICAL_START) // 0xffffffff81000000
+
+// Kernel image size is limited to 512 MB
+#define KERNEL_IMAGE_SIZE   (512 * 1024 * 1024)
+#define KERNEL_IMAGE_START  _AC(0xffffffff80000000, UL)
+</pre>
+
+pagetable
+<div id="pagetable" class="mar-btm"></div>
+<script>
+var init_level4_pgt = 0x81a03000,
+    level3_ident_pgt = 0x81a04000,
+    level3_kernel_pgt = 0x81a05000,
+    level2_fixmap_pgt = 0x81a06000,
+    level1_fixmap_pgt = 0x81a07000,
+    level2_ident_pgt = 0x81a08000,
+    level2_kernel_pgt = 0x81a09000,
+    level2_spare_pgt = 0x81a0a000,
+    __START_KERNEL_map = 0x80000000,
+    _KERNPG_TABLE = 0x63,
+    _PAGE_TABLE = 0x67;
+function buildLevel2(addr, perm, count) {
+    var entries = {};
+    for (i = 0; i < count; i++) {
+        entries[i] = addr + i * 0x200000 + perm
+    }
+    return entries;
+}
+$('#pagetable').pagetable([
+    {
+        name: 'init_level4_pgt',
+        addr: init_level4_pgt,
+        entries: {
+            0: level3_ident_pgt - __START_KERNEL_map + _KERNPG_TABLE,
+            272: level3_ident_pgt - __START_KERNEL_map + _KERNPG_TABLE,
+            511: level3_kernel_pgt - __START_KERNEL_map + _PAGE_TABLE
+        }
+    },
+    {
+        name: 'level3_ident_pgt',
+        addr: level3_ident_pgt,
+        entries: {
+            0: level2_ident_pgt - __START_KERNEL_map + _KERNPG_TABLE
+        }
+    },
+    {
+        name: 'level3_kernel_pgt',
+        addr: level3_kernel_pgt,
+        entries: {
+            510: level2_kernel_pgt - __START_KERNEL_map + _KERNPG_TABLE,
+            511: level2_fixmap_pgt - __START_KERNEL_map + _PAGE_TABLE
+        }
+    },
+    {
+        name: 'level2_fixmap_pgt',
+        addr: level2_fixmap_pgt,
+        entries: {
+            506: level1_fixmap_pgt - __START_KERNEL_map + _PAGE_TABLE
+        }
+    },
+    {
+        name: 'level1_fixmap_pgt',
+        addr: level1_fixmap_pgt,
+        entries: {}
+    },
+    {
+        name: 'level2_ident_pgt',
+        addr: level2_ident_pgt,
+        entries: buildLevel2(0, 0x1e3, 512)
+    },
+    {
+        name: 'level2_kernel_pgt',
+        addr: level2_kernel_pgt,
+        entries: buildLevel2(0, 0x1e3, 512/2)
+    },
+    {
+        name: 'level2_spare_pgt',
+        addr: level2_spare_pgt,
+        entries: {}
+    }
+]);
+</script>
+
+<img src="images/2M-PageTable.png">
+
+<h3>startup_64</h3>
+在head_64.S里写死的pagetable map了0xffff880000000000开头的1GB内存(level2_ident_pgt) 和 从0xffffffff80000000到0xffffffffa0000000的512M内存(level2_kernel_pgt).<br>
+<pre>
+init_level4_pgt -> level3_ident_pgt -> level2_ident_pgt
+init_level4_pgt -> level3_kernel_pgt -> level2_kernel_pgt
+level2_fixmap_pgt, level1_fixmap_pgt, level2_spare_pgt
+</pre>
+编译时假设了vmlinux会被加载到内存16M处,如果不是,就需要修正pagetable.<br>
+由于写死的pagetable只map了开头的1GB内存,如果vmlinux被加载到1GB以上的位置,那就需要再多map出一些内存,当然首先得知道要map哪段内存,计算出pud_index即可.然后将 level2_spare_pgt 加到 level3_ident_pgt 里, 将加载位置开头的2M内存map(pmd_index)设到 level2_spare_pgt 里. (level2_spare_pgt的spare原来是这个意思)<br>
+接着在ident_complete里继续修正level2_kernel_pgt,我们知道level2_kernel_pgt只用了前256项,后256项是空着的,修正时先测试每一项(8字节)的最后一个bit是否为1,如果是,则修正,否则,跳过去.<br>
+修正完level2_kernel_pgt,接着修正 phys_base 和 trampoline_level4_pgt, trampoline不清楚是做什么用的.<br>
+
+<h3>secondary_startup_64</h3>
+我们在startup_32里已经enable了PAE,这里把PGE也Enable了,然后把init_level4_pgt load进CR3,这样我们就用上了新的Pagetable,并且 level2_kernel_pgt 和 level2_ident_pgt 的 G bit 也起上了作用.<br>
+
+0x1e3 = 0001 1110 0011b (G bit = 1)
+
+<p class="help-block">关于PGE的一些说明</p>
+<blockquote>
+The processor invalidates the TLB whenever CR3 is loaded either explicitly or implicitly. After the
+TLB is invalidated, subsequent address references can consume many clock cycles until their
+translations are cached as new entries in the TLB. Invalidation of TLB entries for frequently-used or
+critical pages can be avoided by specifying the translations for those pages as global. TLB entries for
+global pages are not invalidated as a result of a CR3 load. Global pages are invalidated using the
+INVLPG instruction.<br>
+Global-page extensions are controlled by setting and clearing the PGE bit in CR4 (bit 7). When
+CR4.PGE is set to 1, global-page extensions are enabled. When CR4.PGE is cleared to 0, global-page
+extensions are disabled. When CR4.PGE=1, setting the global (G) bit in the translation-table entry
+marks the page as global.<br>
+The INVLPG instruction ignores the G bit and can be used to invalidate individual global-page entries
+in the TLB. To invalidate all entries, including global-page entries, disable global-page extensions
+(CR4.PGE=0).
+</blockquote>
+
+接下来Enable了System Call和No Execute(如果支持的话).
+<p class="help-block">关于SCE</p>
+<blockquote>
+    <b>System-Call Extension (SCE) Bit.</b> Setting this bit to 1 enables the SYSCALL and SYSRET instructions. Application software can use these instructions for low-latency system calls and returns in a non-segmented (flat) address space.
+</blockquote>
+<p class="help-block">关于NXE,前边的pagetable的63位都是0,也就是说,map的内存里的代码是可执行的</p>
+<blockquote>
+    <b>No Execute (NX) Bit.</b> Bit 63. This bit is present in the translation-table entries defined for PAE
+paging.<br>
+    This bit controls the ability to execute code from all physical pages mapped by the table entry. For
+example, a page-map level-4 NX bit controls the ability to execute code from all 128M
+(512 × 512 × 512) physical pages it maps through the lower-level translation tables. When the NX bit
+is cleared to 0, code can be executed from the mapped physical pages. When the NX bit is set to 1,
+code cannot be executed from the mapped physical pages.
+</blockquote>
+
+到目前为止,我们的所有操作都没有用到栈,但栈一定要设的:<br>
+<pre>movq stack_start(%rip), %rsp
+
+ENTRY(stack_start)
+    .quad  init_thread_union+THREAD_SIZE-8
+    .word  0
+</pre>
+我们看到,%rsp设到了init_thread_union的stack上. 这个后边再细说.<br><br>
+
+接着,load了新的gdt. 现在的gdt是在startup_32时load的,注释里说的不太明白怎么回事.<br>
+新的gdt定义在arch/x86/kernel/cpu/common.c#0138,显然是一个cpu有一个.<br><br>
+
+gdt ready之后,重置了ds,ss,es,我们知道64bit-mode下这三个段寄存器没用处,fs和gs有用,但目前不太了解,略过.<br><br>
+
+最后，再次使用lret跳转到C语言入口函数 x86_64_start_kernel(char *real_mode_data),并设置好了正确的CS(我们load了新的gdt).<br><br>
+
+OK,到此,我们算是进入了C语言环境,接下来的kernel代码就是C语言的了,易读多了.
+
+</div>
+<script src="prism.js"></script>
+</body>
+</html>
