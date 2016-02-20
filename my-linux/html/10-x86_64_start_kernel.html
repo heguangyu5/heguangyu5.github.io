@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">
+    x86_64_start_kernel(char * real_mode_data)<br>
+    <small>arch/x86/kernel/head64.c break point: 0x1ae334b</small>
+</h1>
+
+<pre class="line-numbers" data-start="74"><code class="language-c">	/* clear bss before set_intr_gate with early_idt_handler */
+	clear_bss();
+
+	/* Make NULL pointers segfault */
+	zap_identity_mappings();</code></pre>
+首先,将bss段清0;<br>
+然后将init_level4_pgt的第0项也清空为0,这样任何指令访问地址为0的内存时,由于pagetable项没有Present,就会报Page Fault Exception.<br>
+至于说报segfault,肯定是和linux后边的Exception处理有关.待到后边就知道了.<br>
+<pre>
+8.2.15 #PF—Page-Fault Exception (Vector 14)
+
+A #PF exception can occur during a memory access in any of the following situations:
+
+• A page-translation-table entry or physical page involved in translating the memory access is not present in physical memory. This is indicated by a cleared present bit (P=0) in the translation-table entry.
+• An attempt is made by the processor to load the instruction TLB with a translation for a non-executable page.
+• The memory access fails the paging-protection checks (user/supervisor, read/write, or both).
+• A reserved bit in one of the page-translation-table entries is set to 1. A #PF occurs for this reason only when CR4.PSE=1 or CR4.PAE=1.
+
+#PF cannot be disabled.
+</pre>
+
+<br><br>
+<pre class="line-numbers" data-start="80"><code class="language-c">	max_pfn_mapped = KERNEL_IMAGE_SIZE >> PAGE_SHIFT;</code></pre>
+<b>max_pfn_mapped</b> 这个变量很重要,它记录着当前map了多少个page. pfn short for page frame number.
+
+<br><br>
+<pre class="line-numbers" data-start="82"><code class="language-c">	for (i = 0; i < NUM_EXCEPTION_VECTORS; i++) {
+#ifdef CONFIG_EARLY_PRINTK
+		set_intr_gate(i, &early_idt_handlers[i]);
+#else
+		set_intr_gate(i, early_idt_handler);
+#endif
+	}
+	load_idt((const struct desc_ptr *)&idt_descr);</code></pre>
+接下来load了idt, idt_table定义在arch/x86/kernel/head_64.S里,在bss段;<br>
+.config里设了CONFIG_EARLY_PRINTK=y,所以我们用的是early_idt_handlers[i],这个也是定义在early_idt_handlers[i]里,这个函数有十几行汇编,应该是打印出来详细的interupt信息,我们略过,只看最后两行就好了:
+<pre class="line-numbers" data-start="82"><code class="language-c">1: hlt
+    jmp 1b</code></pre>
+意思很明白了,如果在早期接收到了interupt,直接hlt(实际上在arch/x86/boot/compressed/head_64.S的开头就执行了cli指令,屏蔽了外部中断).
+
+
+<h1 class="page-header">
+    x86_64_start_reservations(char *real_mode_data)<br>
+    <small>break point: 0x1ae3215</small>
+</h1>
+
+<pre class="line-numbers" data-start="99"><code class="language-c">	copy_bootdata(__va(real_mode_data));</code></pre>
+__va将phys addr转换成virt addr,当然还有一个__pa可以将virt addr转换成phys addr.<br>
+@see include/asm-generic/page.h
+<pre class="line-numbers" data-start="76"><code class="language-c">	#define __va(x) ((void *)((unsigned long)(x) + PAGE_OFFSET)) // PAGE_OFFSET = 0xffff880000000000
+	#define __pa(x) ((unsigned long) (x) - PAGE_OFFSET)</code></pre>
+
+<blockquote>
+    我们在 <a href="7-linux内核启动之进入C语言环境.html" target="_blank">7-linux内核启动之进入C语言环境.html</a> 的开头特别说了一下kernel对virt addr space的规划.<br>
+    kernel目前最大支持64TB内存,从ffff880000000000到ffffc7ffffffffff,<br>
+    kernel运行到现在只map了1GB内存, init_level4_pgt(272)->level3_ident_pgt(0)->level2_ident_pgt(512*2M=1G).<br>
+    这个virt addr space我们称之为ident addr space.<br>
+    从ffffffff80000000到ffffffffa0000000这512M我们称之为kernel addr space.<br>
+    init_level4_pgt(511)->level3_kernel_pgt(510)->level2_kernel_pgt(256*2M=512M) <br>
+</blockquote>
+
+copy_bootdata将real_mode_data全都copy到了boot_params里,由于cmd_line_ptr仅仅是个指针,所以也要把cmdline copy出来,在 <a href="5-GRUB是怎么启动linux的.html" target="_blank">5-GRUB是怎么启动linux的.html</a> 里,我们知道GRUB把cmdline放在了real_mode_target + 0x1000处,并预留了0x1000=4K大小的内存,不过这里copy时最多copy 2048个字节.<br><br>
+
+像boot_params和boot_command_line这些全局变量的地址很有用,我们可以在bochs里通过地址查看变量里的具体内容.所以要把地址记下来.
+<pre class="bg-info">
+boot_params         0xffffffff81b28380
+boot_command_line   0xffffffff81b243c0
+</pre>
+
+做完copy之后,real_mode_data就没用了.<br><br>
+
+<pre class="line-numbers" data-start="99"><code class="language-c">	memblock_init();
+
+	memblock_x86_reserve_range(__pa_symbol(&_text), __pa_symbol(&__bss_stop), "TEXT DATA BSS");
+
+#ifdef CONFIG_BLK_DEV_INITRD
+	/* Reserve INITRD */
+	if (boot_params.hdr.type_of_loader && boot_params.hdr.ramdisk_image) {
+		/* Assume only end is not page aligned */
+		unsigned long ramdisk_image = boot_params.hdr.ramdisk_image;
+		unsigned long ramdisk_size  = boot_params.hdr.ramdisk_size;
+		unsigned long ramdisk_end   = PAGE_ALIGN(ramdisk_image + ramdisk_size);
+		memblock_x86_reserve_range(ramdisk_image, ramdisk_end, "RAMDISK");
+	}
+#endif
+
+	reserve_ebda_region();</code></pre>
+
+在内核的内存管理ready之前,我们需要一个简单一点的内存管理办法.memblock就是用来做这个的.<br>
+memblock_init过后,reserve了kernel从_text到__bss_stop这一大块内存,看一下arch/x86/kernel/vmlinux.lds.S就会明白,__bss_stop后边就是__brk_base了,reserve的这块内存是目前kernel作为一个程序运行中所需的全部内存了.(查System.map可知 _text = 0x1000000, __bss_stop = 0x1d04000, size = 0xd04000)<br>
+之后,reserve了ramdisk(initrd)占用的内存.(这里用到了boot_params,我们下边要写个小程序,来方便地读取boot_params里的值. ramdisk_image = 0x796e000 ramdisk_size = 0x7d000 = 500K)<br>
+再之后,reserve了ebda.关于EBDA,<br>
+@see <a href="http://wiki.osdev.org/Memory_Map_(x86)" target="_blank">http://wiki.osdev.org/Memory_Map_(x86)</a><br>
+@see <a href="http://www.bioscentral.com/misc/bda.htm" target="_blank">http://www.bioscentral.com/misc/bda.htm</a><br>
+通过读取BDA 0x413处的数值,得到了lowmem的大小为0x27f(左移10位)=639K, 再通过读取0x40E处的数值,得到了EBDA的开始地址为0x9fc0(左移4位)=0x9fc00=639K.<br>
+最终将0x9fc00(639K)到1M这385K大小的内存全都reserve了.<br><br><br>
+
+<a href="../tools/print_boot_params" target="_blank"><i class="glyphicon glyphicon-download"></i> Download print_boot_params</a>
+<a href="../tools/print_boot_params.c" target="_blank"><i class="glyphicon glyphicon-download"></i> Download print_boot_params.c</a>
+<pre><code class="language-bash">$ ./print_boot_params
+sizeof(struct boot_params) = 4096
+usage: ./print_boot_params /path/to/boot_params.memdump
+
+// bochs: writemem "/tmp/boot_params.memdump" 0xffffffff81b28380 4096
+
+$ ./print_boot_params /tmp/boot_params.memdump
+sizeof(struct boot_params) = 4096
+boot_params.hdr.type_of_loader  = 0x72
+boot_params.hdr.ramdisk_image   = 0x796e000
+boot_params.hdr.ramdisk_size    = 0x7d000
+</code></pre>
+<br><br>
+
+<pre class="bg-info">
+memblock                        0xffffffff81b3e9a0
+memblock_memory_init_regions    0xffffffff81b3f200
+memblock_reserved_init_regions  0xffffffff81b3e9e0
+</pre>
+
+<a href="../tools/print_memblock" target="_blank"><i class="glyphicon glyphicon-download"></i> Download print_memblock</a>
+<a href="../tools/print_memblock.c" target="_blank"><i class="glyphicon glyphicon-download"></i> Download print_memblock.c</a>
+<pre><code class="language-bash">$ ./print_memblock
+sizeof(struct memblock) = 64
+sizeof memblock.memory/reserved = INIT_MEMBLOCK_REGIONS * sizeof(struct memblock_region) = 2048
+usage: ./print_memblock /path/to/memblock.memdump /path/to/memblock_memory.memdump /path/to/memblock_reserved.memdump
+
+// bochs: writemem "/tmp/memblock.memdump" 0xffffffff81b3e9a0 64
+// bochs: writemem "/tmp/memblock.memory.memdump" 0xffffffff81b3f200 2048
+// bochs: writemem "/tmp/memblock.reserved.memdump" 0xffffffff81b3e9e0 2048
+
+$  ./print_memblock /tmp/memblock.memdump /tmp/memblock.memory.memdump /tmp/memblock.reserved.memdump
+sizeof(struct memblock) = 64
+sizeof memblock.memory/reserved = INIT_MEMBLOCK_REGIONS * sizeof(struct memblock_region) = 2048
+memblock.current_limit  = 0xffffffffffffffff
+memblock.memory_size    = 0
+memblock.memory.cnt     = 0x1
+memblock.memory.max     = 0x80
+memblock.memory.regions = 0xffffffff81b3f200
+memblock.reserved.cnt     = 0x3
+memblock.reserved.max     = 0x80
+memblock.reserved.regions = 0xffffffff81b3e9e0
+--memory regions--
+0: start=0, end=0, size=0
+--reserved regions--
+0: start=0x9fc00, end=0x100000, size=0x60400        // EBDA
+1: start=0x1000000, end=0x1d04000, size=0xd04000    // Kernel TEXT DATA BSS
+2: start=0x796e000, end=0x79eb000, size=0x7d000     // RAMDISK
+</code></pre>
+</div>
+<script src="prism.js"></script>
+</body>
+</html>
