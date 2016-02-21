@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">
+    start_kernel(void)<br>
+    <small>init/main.c break point: 0x1ae3844</small>
+</h1>
+
+<code>smp_setup_processor_id();</code>不产生任何实际指令,就是个空函数.<br>
+<code>lockdep_init();</code> <code>debug_objects_early_init();</code>一条指令都没有生成<br>
+怎么判断出来的? call 0xffffffff813982f0 查System.map可以,这是在调用get_random_bytes,已经在执行<code>boot_init_stack_canary();</code>了.<br>
+虽然在arch/x86/include/asm/stackprotector.h的头部注释里有解释,但是还不清楚这个stackprotector是怎么工作的.<br>
+boot_init_stack_canary就是生成个随机数,然后写入到current->stack_canary和irq_stack_union.stack_canary里去.<br>
+current和irq_stack_union都是PER_CPU variable.<br><br>
+
+<code>cgroup_init_early();</code>不清楚是做什么用的,先略过去.<br><br>
+
+<code>local_irq_disable();</code>其实就相当于<code>cli</code>.<br><br>
+
+<code>tick_init();</code>还不清楚是怎么工作的,略过.<br><br>
+
+<code>boot_cpu_init();</code><br>
+<pre>
+smp_processor_id() -> raw_smp_processor_id() // include/linux/smp.h#0177
+                        -> percpu_read(cpu_number) // arch/x86/include/asm/smp.h#0191
+                            -> DEFINE_PER_CPU(int, cpu_number); // arch/x86/kernel/setup_percpu.c#0024
+                               EXPORT_PER_CPU_SYMBOL(cpu_number);
+</pre>
+关于cpu的管理,include/linux/cpumask.h的注释里写的很清楚,分四种状态 possible, present, active, online, 在.config里可以看到CONFIG_HOTPLUG_CPU=y, CONFIG_NR_CPUS=256, 所以cpu可以hotplug,并且kernel最多支持256个cpu.<br>
+boot_cpu_init把第0个cpu设为online, active, present, possible;<br><br>
+<pre class="bg-info">
+// cpu的状态使用bitmap管理,256bits / 8 = 32 bytes
+cpu_online_bits     0x1ac5d80
+cpu_possible_bits   0x1ac5da0
+cpu_present_bits    0x1ac5dc0
+cpu_active_bits     0x1ac5de0
+</pre>
+
+<code>page_address_init();</code>查.config可以知道,里边没有HASHED_PAGE_VIRTUAL,也没有WANT_PAGE_VIRTUAL,所以<code>#define page_address_init()  do { } while(0)</code><br><br>
+
+<code>printk(KERN_NOTICE "%s", linux_banner);</code>, linux_banner定义在 init/version.c#0041
+<pre><code class="language-c">const char linux_banner[] =
+	"Linux version " UTS_RELEASE " (" LINUX_COMPILE_BY "@"
+	LINUX_COMPILE_HOST ") (" LINUX_COMPILER ") " UTS_VERSION "\n";</code></pre>
+printk打印的这句话可以在/var/log/syslog里找到,在我的机器上是: <small>Linux version 3.8.0-38-generic (buildd@lamiak) (gcc version 4.6.3 (Ubuntu/Linaro 4.6.3-1ubuntu5) ) #56~precise1-Ubuntu SMP Thu Mar 13 16:22:48 UTC 2014 (Ubuntu 3.8.0-38.56~precise1-generic 3.8.13.19)</small><br>
+等到可以再在bochs里查看一下我们自己编译的这个kernel打印出来的是什么.<br><br>
+
+
+
+<script src="prism.js"></script>
+</div>
+</body>
+</html>
