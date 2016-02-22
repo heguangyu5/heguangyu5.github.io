@@ -1,0 +1,2071 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="prism.css">
+<script src="jquery.min.js"></script>
+<script src="pagetable.js"></script>
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">
+    setup_arch(char **cmdline_p)<br>
+    <small>/arch/x86/kernel/setup.c break point: 0x1ae8cdd</small>
+</h1>
+
+<code>printk(KERN_INFO "Command line: %s\n", boot_command_line);</code><br>
+之前在x86_64_start_reservations里copy_bootdata时把GRUB的cmdline copy到boot_command_line里了,所以这个在bochs里应该是 <small>Command line: BOOT_IMAGE=/bzImage</small><br>
+可以在/var/log/syslog里找到,在我的机器上是: <small>Command line: BOOT_IMAGE=/boot/vmlinuz-3.8.0-38-generic root=UUID=a07f2933-e8d2-497e-8c77-d0b8f93b6128 ro</small><br><br>
+
+<code>olpc_ofw_detect();</code>在.config里没有找到CONFIG_OLPC,所以这行代码不产生任何实际指令.同理,下边的<code>setup_olpc_ofw_pgd();</code>也不产生实际指令.<br><br>
+
+<code>early_trap_init();</code>
+<pre class="line-numbers" data-start="814"><code class="language-c">/* Set of traps needed for early debugging. */
+void __init early_trap_init(void)
+{
+	set_intr_gate_ist(1, &debug, DEBUG_STACK);
+	/* int3 can be called from all */
+	set_system_intr_gate_ist(3, &int3, DEBUG_STACK);
+	set_intr_gate(14, &page_fault);
+	load_idt(&idt_descr);
+}</code></pre>
+之前在 x86_64_start_kernel 里,把前32个中断的handler都设成了 early_idt_handler, 这里把1,3,14给设成了对应的handler.至于具体的handler是怎么个逻辑,先跳过去.<br><br>
+
+<code>early_cpu_init();</code>
+<pre class="line-numbers" data-start="673"><code class="language-c">void __init early_cpu_init(void)
+{
+	const struct cpu_dev *const *cdev;
+	int count = 0;
+
+#ifdef CONFIG_PROCESSOR_SELECT
+	printk(KERN_INFO "KERNEL supported cpus:\n");
+#endif
+
+	for (cdev = __x86_cpu_dev_start; cdev < __x86_cpu_dev_end; cdev++) {
+		const struct cpu_dev *cpudev = *cdev;
+
+		if (count >= X86_VENDOR_NUM)
+			break;
+		cpu_devs[count] = cpudev;
+		count++;
+
+#ifdef CONFIG_PROCESSOR_SELECT
+		{
+			unsigned int j;
+
+			for (j = 0; j < 2; j++) {
+				if (!cpudev->c_ident[j])
+					continue;
+				printk(KERN_INFO "  %s %s\n", cpudev->c_vendor,
+					cpudev->c_ident[j]);
+			}
+		}
+#endif
+	}
+	early_identify_cpu(&boot_cpu_data);
+}</code></pre>
+__x86_cpu_dev_start, __x86_cpu_dev_end是怎么做的初始化呢?关键点在于vmlinux.lds.S
+<pre>	.x86_cpu_dev.init : AT(ADDR(.x86_cpu_dev.init) - LOAD_OFFSET) {
+		__x86_cpu_dev_start = .;
+		*(.x86_cpu_dev.init)
+		__x86_cpu_dev_end = .;
+	}</pre>
+在每个cpu的代码里,都会调用cpu_dev_register(),比如arch/x86/kernel/cpu/amd.c#0680
+<pre>cpu_dev_register(amd_cpu_dev);</pre>
+再如,arch/x86/kernel/cpu/intel.c#0527
+<pre>cpu_dev_register(intel_cpu_dev);</pre>
+而cpu_dev_register是这样定义的:
+<pre class="line-numbers" data-start="27"><code class="language-c">#define cpu_dev_register(cpu_devX) \
+	static const struct cpu_dev *const __cpu_dev_##cpu_devX __used \
+	__attribute__((__section__(".x86_cpu_dev.init"))) = \
+	&cpu_devX;</code></pre>
+这样,在编译完成之后,这个section里就包含了编译进来的cpu_dev的指针.<br>
+for循环结束后,编译进来的cpu就都放到cpu_devs里了.相应的信息也都打印到syslog里.<br>
+在我的机器上是:
+<pre>KERNEL supported cpus:
+  Intel GenuineIntel
+  AMD AuthenticAMD
+  Centaur CentaurHauls
+
+</pre>
+early_identify_cpu在当前cpu上检测其各项属性,保存到boot_cpu_data里,后边要是用到的话,我们可以写个小程序把它打印出来.<br><br>
+
+<code>early_ioremap_init();</code><br>
+理解early_ioremap_init的入口貌似在__fix_to_virt(x)上,<code>#define __fix_to_virt(x)    (FIXADDR_TOP - ((x) &lt;&lt; PAGE_SHIFT))</code>.
+<pre><code class="language-c">enum fixed_addresses {
+    VSYSCALL_LAST_PAGE,     // 0
+    VSYSCALL_FIRST_PAGE = VSYSCALL_LAST_PAGE + ((VSYSCALL_END-VSYSCALL_START) >> PAGE_SHIFT) - 1,
+                        // 0 + (((-2UL &lt;&lt; 20) - (-10UL &lt;&lt; 20)) &gt;&gt; 12) - 1  = 2047
+                        // 看来VSYSCALL占有0-2047共2048个page,8M大小
+    VSYSCALL_HPET,
+    ...
+    __end_of_permanent_fixed_addresses,
+    // 256 temporary boot-time mappings, used by early_ioremap(),before ioremap() is functional.
+    FIX_BTMAP_END,  // 2183
+    FIX_BTMAP_BEGIN = FIX_BTMAP_END + TOTAL_FIX_BTMAPS - 1 // 2183 + 256 - 1 = 2438
+}
+</code></pre>
+<pre>
+FIXADDR_TOP = VSYSCALL_END-PAGE_SIZE = (-2UL &lt;&lt; 20) - 0x1000 = 0xffffffffffdff000
+__fix_to_virt(FIX_BTMAP_BEGIN) = 0xffffffffff479000
+__fix_to_virt(FIX_BTMAP_END)   = 0xffffffffff578000
+</pre>
+<pre><code class="language-bash">$ ./calc-pgt 0xffffffffff479000
+0XFFFFFFFFFF479000 => 0XFFFFFF479000
+PGDIR = 0X1FF = 511 // init_level4_pgt(511) => 0x1a05000
+PUD   = 0X1FF = 511 // level3_kernel_pgt(511) => 0x1a06000
+PMD   = 0X1FA = 506 // level2_fixmap_pgt(506) => 0x1a07000 level1_fixmap_pgt ---> &bm_pte
+PT    = 0X79 = 121</code></pre>
+最终,early_ioremap_init()的结果就是将level2_fixmap_pgt的506项指向了bm_pte.具体要怎么使用,等后边用到的时候再分析.<br><br>
+
+接下来,给一系列全局变量赋值, ROOT_DEV, screen_info, edid_info, saved_video_mode, bootloader_type, bootloader_version, rd_image_start, rd_prompt, rd_doload.<br>
+boot_params.hdr.type_of_loader = 0x72 &gt;&gt; 4 = 7<br>
+0x72 & 0xf = 2<br>
+boot_params.hdr.ext_loader_ver = 0 &lt;&lt; 4 = 0,最终bootloader_version = 2<br>
+boot_params.efi_info.efi_loader_signature = '', 所以 efi_enabled = 0; <br><br>
+
+
+<code>x86_init.oem.arch_setup();</code> @see arch/x86/kernel/x86_init.c arch_setup = x86_init_noop <br><br>
+
+<code>iomem_resource.end = (1ULL &lt;&lt; boot_cpu_data.x86_phys_bits) - 1;</code>
+<pre><code class="language-c">// include/linux/ioport.h#0018
+/*
+ * Resources are tree-like, allowing
+ * nesting etc..
+ */
+struct resource {
+	resource_size_t start;
+	resource_size_t end;
+	const char *name;
+	unsigned long flags;
+	struct resource *parent, *sibling, *child;
+};
+
+// kernel/resource.c#0033
+struct resource iomem_resource = {
+	.name	= "PCI mem",
+	.start	= 0,
+	.end	= -1, // (1ULL &lt;&lt; boot_cpu_data.x86_phys_bits) - 1 = (1ULL &lt;&lt; 46) - 1 = 64TB -1
+	.flags	= IORESOURCE_MEM,
+};
+EXPORT_SYMBOL(iomem_resource);
+</code></pre>
+
+
+<code>setup_memory_map();</code>
+<pre><code class="language-c">void __init setup_memory_map(void)
+{
+	char *who;
+
+	who = x86_init.resources.memory_setup(); // default_machine_specific_memory_setup
+	memcpy(&e820_saved, &e820, sizeof(struct e820map));
+	printk(KERN_INFO "BIOS-provided physical RAM map:\n");
+	e820_print_map(who);
+}</code></pre>
+<code>default_machine_specific_memory_setup();</code>将GRUB提供的e820_map做好整理后,append进全局变量e820.<br>
+GRUB提供的e820_map我们可以用print_boot_params打印出来:
+<pre>
+boot_params.e820_map:
+   0: addr=0, size=0x9f000, end=0x9f000, type=1
+   1: addr=0x9f000, size=0x1000, end=0xa0000, type=2
+   2: addr=0xe8000, size=0x18000, end=0x100000, type=2
+   3: addr=0x100000, size=0x7ef0000, end=0x7ff0000, type=1
+   4: addr=0x7ff0000, size=0x10000, end=0x8000000, type=3
+   5: addr=0xfffc0000, size=0x40000, end=0x100000000, type=2
+</pre>
+sanitize过后,我们可以再打印一遍,会发现对于我们来说,啥都没变.<br>
+然后把e820 copy到e820_saved里,然后打印出e820变量的内容.这个内容同样可以在syslog里看到.<br>
+<blockquote>
+这里学到一个用法,在函数A里的字符串常量我们可以把地址return出来,在函数B里接着用.<br>
+应该是编译了之后,字符串常量被放在一个section里了,它的地址是固定不变的,当然可以随便引用了.<br>
+早就应该在grub处理cmdline的时候就意识到的.
+<pre>#include &lt;stdio.h&gt;
+
+char *a()
+{
+	char *str = "hello world";
+	return str;
+}
+
+int main(void)
+{
+	char *s = a();
+	printf("%s\n", s);
+	return 1;
+}</pre>
+</blockquote>
+e820.c开头的注释里说了,e820后边会被修改的,e820_map后边不会被修改,并且是留给/sys/firmware/memmap用的.<br>
+这里我们copy下打印的代码,写个小程序把e820_saved给打印出来,等后边可以访问/sys/firmware/memmap了,可以做个对比.
+<pre class="bg-info">
+e820_saved  0xffffffff81bb7220
+</pre>
+
+<a href="../tools/print_e820_saved" target="_blank"><i class="glyphicon glyphicon-download"></i> Download print_e820_saved</a>
+<a href="../tools/print_e820_saved.c" target="_blank"><i class="glyphicon glyphicon-download"></i> Download print_e820_saved.c</a>
+<pre><code class="language-bash">$ ./print_e820_saved
+sizeof(struct e820_map) = 2564
+usage: ./print_e820_saved /path/to/e820_saved.memdump
+
+// bochs: writemem "/tmp/e820_saved.memdump" 0xffffffff81bb7220 2564
+
+./print_e820_saved /tmp/e820_saved.memdump
+sizeof(struct e820_map) = 2564
+e820_saved.nr_map = 6
+0: 0                - 9f000            (9f000           ) E820_RAM
+1: 9f000            - a0000            (1000            ) E820_RESERVED
+2: e8000            - 100000           (18000           ) E820_RESERVED
+3: 100000           - 7ff0000          (7ef0000         ) E820_RAM
+4: 7ff0000          - 8000000          (10000           ) E820_ACPI
+5: fffc0000         - 100000000        (40000           ) E820_RESERVED
+</code></pre>
+
+<br><br>
+
+接下来的<code>parse_setup_data();</code>和<code>e820_reserve_setup_data();</code>都在boot_params.hdr.setup_data有值的情况下才有用,我们可以用print_boot_params看到setup_data=0,所以这两个函数没啥作用,跳过去就是了.<br><br>
+
+<code>copy_edd();</code> 搜索一下发现EDD是Enhanced Disk Drive的缩写,应该是BIOS提供的硬盘方面的信息,但打印出来boot_params里的eddbuf发现,里边是空的.edd_mbr_sig_buffer确实是有值,bios验证也是如此.(edd 0x1bb6ee0, break point: 0x1ae8f9f). 先跳过去吧.<br><br>
+
+<pre><code class="language-c">if (!boot_params.hdr.root_flags) // print_boot_params 得到 root_flags = 0x1, 所以下边这句不会执行
+    root_mountflags &= ~MS_RDONLY;
+
+// include/linux/fs.h
+#define MS_RDONLY    1  /* Mount read-only */
+#define MS_SILENT   32768
+
+// init/do_mounts.c#0028
+int root_mountflags = MS_RDONLY | MS_SILENT;
+</code></pre>
+<br>
+
+接下来是连续的几个赋值, 等用到了再说,现在不知道有什么用.<br><br>
+
+CONFIG_CMDLINE_BOOL not set, so skip again.<br><br>
+
+然后把boot_command_line给copy了一份到command_line里,并把setup_arch(char *cmdline_p)的cmdline_p指向command_line,还不知道要做什么用.<br><br>
+
+<code>x86_configure_nx();</code> __supported_pte_mask |= _PAGE_NX; <br><br>
+
+<code>parse_early_param();</code>
+<pre><code class="language-c">
+    strlcpy(tmp_cmdline, boot_command_line, COMMAND_LINE_SIZE);
+    parse_early_options(tmp_cmdline);
+        parse_args("early options", cmdline, NULL, 0, do_early_param);
+            args = next_arg(args, &param, &val); // 从cmdline里找到param=val,我们目前是param=BOOT_IMAGE val=/bzImage
+            parse_one(param, val, params, num, unknown); // params = NULL(第3个参数),
+                                                         // num = 0(第4个参数)
+                                                         // unknown = do_early_param (第5个参数)
+                return handle_unknown(param, val); // return do_early_param("BOOT_IMAGE", "/bzImage");
+                    // do_early_param(param, val) 做的事是遍历从 __setup_start 到 __setup_end, 并执行setup_func
+                    struct obs_kernel_param {
+                        const char *str;
+                        int (*setup_func)(char *);
+                        int early;
+                    }
+               // __setup_start = 0x1b86000, __setup_end = 0x1b87500
+               // 不太容易搞清楚这块是怎么来的,分析几个看看
+               {char *str = 0x1b49780(rdinit=);  setup_func = 0x1ae3527(rdinit_setup); int early = 0}
+               {char *str = 0x1b49788(init=);    setup_func = 0x1ae34ff(init_setup);   int early = 0}
+               {char *str = 0x1b4978e(loglevel); setup_func = 0x1ae354f(loglevel);     int early = 1}
+               {char *str = 0x1b49797(quiet);    setup_func = 0x1ae34ed(quiet_kernel); int early = 1}
+               // so 如果有 BOOT_IMAGE=, 那就是要调用对应的setup_func, 看起来是没有 BOOT_IMAGE=
+               // 所以最终 do_early_param 算是啥也没做
+               // 不过我本机电脑上的cmdline除了BOOT_IMAGE还有两个选项, root=UUID=a07f2933-e8d2-497e-8c77-d0b8f93b6128 ro
+               // root和ro都有
+               {char *str = 0x1b497dc(root=); setup_func = 0x1ae3deb(root_dev_setup);     int early = 0}
+               {char *str = 0x1b497e5(ro);    setup_func = 0x1ae3e27(readonly); int early = 0}
+</code></pre>
+<br>
+
+
+<code>x86_report_nx();</code> 在syslog里打印出来 NX (Execute Disable) protection: active <br><br>
+
+<code>memblock_x86_reserve_range_setup_data();</code> 我们知道 boot_params.hdr.setup_data = 0, 所以这个函数啥都没做<br><br>
+
+<code>acpi_mps_check();</code> 这个函数返回0,所以disable_apic = 0; <br><br>
+
+<code>pci_early_dump_regs = 0</code> 很明白了<br><br>
+
+<code>finish_e820_parsing();</code> userdef = 0, so continue <br><br>
+
+前边我们已经知道了 efi_enabled = 0, continue. <br><br>
+
+<code>dmi_scan_machine();</code>
+<pre><code class="language-c">
+    p = dmi_ioremap(0xF0000, 0x10000);
+    // 这个dmi_ioremap让我们搞清楚了前边 early_ioremap_init 是怎么回事了.
+    // 这里我们要访问从0xF0000开始的0x10个page的内存,我们需要先把pagetable给做上,然后才能访问(为什么不直接用那64TB的内存pagetable?是因为pagetable的权限吗?)
+    // 怎么做map呢,我们之前将256个page分成了4组,每组64个,由于这是我们第一次使用early_ioremap,所以4个slot都空着呢,所以用第一个就行,
+    // 然后计算出第1个slot的的idx,那后把map给做上. 我们已经知道现在的pagetable是bm_pte了
+    // 这16个page的map应该是从 0xffffffffff479000 - 0xffffffffff489000
+    // calc-pgt后得到 bm_pte[121](0xF0000) - bm_pte[137] (0xFF000)
+    // bochs验证一下: bm_pte = 0x1bb2000 + 121 * 8 = 0x1bb23c8 break point 0x1b1dd54 , 确实和猜想的一样
+</code></pre>
+@see http://wiki.osdev.org/System_Management_BIOS<br>
+OSDev的这个wiki讲的很清楚了,上边这段内存里放着电脑的相关信息,找到table并parse就行了.<br>
+这个table在0xFA550处, 此时会向syslog里打印 DMI %d.%d present, 不过我的电脑上是 SMBIOS 2.6 present. 可能新版本的kernel把这个字符串给修改了吧.<br>
+parse的结果放到了 dmi_ident 和 dmi_devices 里<br>
+<pre class="bg-info">
+dmi_ident   0x1cfcb00
+dmi_devices 0x1a8c6d0
+</pre>
+<pre><code class="language-c">
+enum dmi_field {
+	DMI_NONE,               // 0
+	DMI_BIOS_VENDOR,        // 1d04000  The Bochs Project
+	DMI_BIOS_VERSION,       // 1d04014  Bochs
+	DMI_BIOS_DATE,          // 1d0401c  01/01/2007
+	DMI_SYS_VENDOR,         // 1d04028  0
+	DMI_PRODUCT_NAME,       // 1d0402c  0
+	DMI_PRODUCT_VERSION,    // 1d04030  0
+	DMI_PRODUCT_SERIAL,     // 1d04034  0
+	DMI_PRODUCT_UUID,       // 0
+	DMI_BOARD_VENDOR,       // 0
+	DMI_BOARD_NAME,         // 0
+	DMI_BOARD_VERSION,      // 0
+	DMI_BOARD_SERIAL,       // 0
+	DMI_BOARD_ASSET_TAG,    // 0
+	DMI_CHASSIS_VENDOR,     // 1d04038  0
+	DMI_CHASSIS_TYPE,       // 1d0403c  0x31 => ascii 1
+	DMI_CHASSIS_VERSION,    // 1d04040  0
+	DMI_CHASSIS_SERIAL,     // 1d04044  0
+	DMI_CHASSIS_ASSET_TAG,  // 1d04048  0
+	DMI_STRING_MAX,
+};
+
+struct dmi_device {
+	struct list_head list;
+	int type;
+	const char *name;
+	void *device_data;	/* Type specific data */
+};
+// 貌似 dmi_devices 是空的
+</code></pre>
+
+<code>init_hypervisor_platform();</code> hyper不太清楚,不过运行结果是 x86_hyper = 0, 所以这个函数也就是简单的返回了,啥也不影响. <br><br>
+
+<code>x86_init.resources.probe_roms();</code> => x86_init_noop. <br><br>
+
+insert_resource先略过.<br><br>
+
+<code>trim_bios_range();</code> 注释里已经写的很清楚了,在e820里把0-64K(0x10000), 640K(0xa0000)-1M标为E820_RESERVED.
+<pre>
+// 前边我们写的小程序 print_e820_saved 同样可以用于打印 e820, 我们把e820打印出来看看
+// bochs里跟踪程序执行到 sanitize_e820_map(e820.map, ARRAY_SIZE(e820.map), &e820.nr_map); 时, 可以看到
+// ARRAY_SIZE(e820.map) = 0x140 = 320
+// 由此,我们可以确定 E820_X_MAX 的值就是 0x140 了
+// __KERNEL__ 是defined, E820_X_MAX = (E820MAX + 3 * MAX_NUMNODES) = (128 + 3 * 64) = 320
+
+./print_e820_saved
+sizeof(struct e820_map) = 6404
+usage: ./print_e820_saved /path/to/e820_saved.memdump
+
+// bochs: writemem "/tmp/e820.memdump" 0xffffffff81bb8b40 6404
+
+./print_e820_saved /tmp/e820.memdump
+sizeof(struct e820_map) = 6404
+e820_saved.nr_map = 7
+0: 0                - 10000            (10000           ) E820_RESERVED     // 0-64K reserved
+1: 10000            - 9f000            (8f000           ) E820_RAM
+2: 9f000            - a0000            (1000            ) E820_RESERVED
+3: e8000            - 100000           (18000           ) E820_RESERVED     // 640K-1M没有被误报为RAM
+4: 100000           - 7ff0000          (7ef0000         ) E820_RAM
+5: 7ff0000          - 8000000          (10000           ) E820_ACPI
+6: fffc0000         - 100000000        (40000           ) E820_RESERVED
+</pre>
+<br>
+
+<code>early_gart_iommu_check();</code> 没弄明白这个gart到底做什么的,不过可以肯定的是,这个函数是在找一块内存,看要不要在e820里标为reserved.我们只用在它执行完成后,再次查看下e820的内容就知道了.<br>
+实际结果是e820内容没变,所以先跳过个函数.<br><br>
+
+<code>max_pfn = e820_end_of_ram_pfn();</code> 这个函数遍历e820,找出RAM的最大值,看上边print_e820的结果,我们知道 max_pfn = 0x7ff0.<br>
+同时会在syslog里打印出来 last_pfn = 0x7ff0, max_arch_pfn = 0x400000000. 我们知道 x86_64 kernel里定义最大支持 64TB 内存,也就是 0x400000000.<br><br>
+
+<code>mtrr_bp_init();</code><br>
+AMD64 Volume2里有对MTRR的详细介绍,简单概括如下:<br>
+MTRR是一系列的Registers,用来标明内存块的cache属性(UC/WC/WT/WP/WB).<br>
+MTRR分为两种: 一种是 Fixed-Range MTRRs, 一种是 Variable-Range MTRRs.<br>
+FIX-Range MTRRs共有11个,每个MTRR可标记8块内存,将0-1M的内存分为88块,怎么分都是定好的,每一块都可以设不同的Type.<br>
+Variable-Range MTRRs最多有8对(Base and Mask),也就是说最多可以标记8块内存的Type,给定一个内存地址,根据Base和Mask可以确定这个内存地址在哪个块里.<br>
+还有一个MTRRdefType Register,就是不在上述范围的内存地址的属性按个Register的来确定.同时这个Register还有两个标记位,用来标明MTRR是否启用以及FIX-Range MTRRs是否启用.<br>
+CPU是否支持MTRR可以使用cpuid来确定.<br>
+还有一个MTRRcap Register,是Read only的,读取它可以知道CPU有多个对Variable-Range MTRRs,以及是否支持FIX-Range MTRRs,还有内存块属性WC是否支持.<br>
+<pre>
+    cpu_has_mttr = true
+    cpuid_eax(0x80000000) = 0x80000008
+    phys_addr = 0x28 = 40
+    size_or_mask = 0xFFFFFFFFF0000000 (break_point: 0x1aed94f)
+    size_and_mask = 0xFF00000
+    num_var_ranges = 8
+    mtrr_usage_table[0...7] = 1
+    get_mttr_state() 将相关数据都保存到了 mtrr_state 里, 并打印到了syslog里. 还有PAT的东西.
+    // 最终的结果是 mtrr_bp_init(); 设好了cpu的mtrr及pat.
+</pre>
+<br>
+
+<code>mtrr_trim_uncached_memory(max_pfn);</code> 这个函数的注释里写的清楚,看起来kernel需要的内存都要设成write-back,不然那些不合要求的内存就都用不了了.
+<pre>
+This routine checks that the highest MTRR matches
+the end of memory, to make sure the MTRRs having a write back type cover
+all of the memory the kernel is intending to use.  If not, it'll trim any
+memory off the end by adjusting end_pfn, removing it from the kernel's
+allocation pools, warning the user with an obnoxious message.
+</pre>
+这个函数返回0,所以内存都合要求.<br><br>
+
+<code>num_physpages = max_pfn;</code> 0x7ff0 * 4K / 1024 = 127.9375M <br><br>
+
+<code>check_x2apic();</code> wikipedia里介绍说 "x2APIC is the most recent generation of the Intel programmable interrupt controller, introduced with the Nehalem microarchitecture. The major improvements of the x2APIC address the number of supported CPUs and performance of the interface.", 不过.config里并没有定义 CONFIG_X86_X2APIC, 所以它不产生任何实际指令.<br><br>
+
+<pre><code class="language-c">	if (max_pfn > (1UL&lt;&lt;(32 - PAGE_SHIFT)))
+		max_low_pfn = e820_end_of_low_ram_pfn();
+	else
+		max_low_pfn = max_pfn;
+
+	high_memory = (void *)__va(max_pfn * PAGE_SIZE - 1) + 1;</code></pre>
+如果内存大于4G,那么max_low_pfn=4G内的最大pfn. 我们的内存只有128M,所以max_low_pfn = 0x7ff0.<br>
+high_memory指向最后一块内存的开始.<br><br>
+
+<code>find_smp_config();</code> -> x86_init.mpparse.find_smp_config -> default_find_smp_config.<br>
+注意里写的很清楚,先看0-1K(0x400)里有没有SMP_MAGIC_IDENT(_MP_),我们可以用bochs查看下,是没有的;<br>
+再看639(0x9fc00)-640k里有没有,同样没有.<br>
+然后再看960k(0xf0000)-1M里有没有,这个范围比较大,有64K,不太好找,我们把这段内存dump出来,hexdump一下,就好找了.
+<pre>
+// bochs writemem "/tmp/a.memdump" 0xffff8800000F0000 0x10000
+hexdump -C a.memdump > a.txt
+vi a.txt
+</pre>
+然后在0xa570处找到了.<br>
+然后 smp_found_config = 1, mpf_found = 0xfa570, 并在syslog里打印出来 SMP MP-table 的地址.<br>
+之后把mpf这一小块内存给memblock_reserved了. mpf->physptr = 0xfa4a0, 然后取得 mpc_table 的大小是 0xc8, 把这一小块内存也reserved.<br>
+我们之前已经知道 memblock 里把 639k(0x9fc00) - 1M 全都 reserve 成 EBDA 了, 所以这里的这两个reserve并不会改变memblock的内容.<br><br>
+
+<code>reserve_ibft_region();</code> 关于iBFT的简单介绍 https://en.wikipedia.org/wiki/ISCSI_Boot_Firmware_Table <br>
+acpi_table_parse(ACPI_SIG_IBFT, acpi_find_ibft); // failed IBFT <br>
+acpi_table_parse(IBFT_SIGN, acpi_find_ibft);     // failed iBFT <br>
+find_ibft_in_mem(); // 在0x80000(512k) - 1M (不包括VGA_MEM 0xa0000-0xc0000 128K)查找 iBFT, failed<br>
+最终这个函数啥也没做.<br><br>
+
+<code>reserve_brk();</code> 前边我们已经 reserve 了 kernel TEXT DATA BSS, 但是 dmi_scan 的时候 extend 了 brk, 所以需要多 reserve 一些.
+<pre>
+// bochs: writemem "/tmp/memblock.memdump" 0xffffffff81b3e9a0 64
+// bochs: writemem "/tmp/memblock.memory.memdump" 0xffffffff81b3f200 2048
+// bochs: writemem "/tmp/memblock.reserved.memdump" 0xffffffff81b3e9e0 2048
+
+$ ./print_memblock /tmp/memblock.memdump /tmp/memblock.memory.memdump /tmp/memblock.reserved.memdump
+sizeof(struct memblock) = 64
+sizeof memblock.memory/reserved = INIT_MEMBLOCK_REGIONS * sizeof(struct memblock_region) = 2048
+memblock.current_limit  = 0xffffffffffffffff
+memblock.memory_size    = 0
+memblock.memory.cnt     = 0x1
+memblock.memory.max     = 0x80
+memblock.memory.regions = 0xffffffff81b3f200
+memblock.reserved.cnt     = 0x3
+memblock.reserved.max     = 0x80
+memblock.reserved.regions = 0xffffffff81b3e9e0
+--memory regions--
+0: start=0, end=0, size=0
+--reserved regions--
+0: start=0x9fc00, end=0x100000, size=0x60400        // EBDA
+1: start=0x1000000, end=0x1d04049, size=0xd04049    // Kernel TEXT DATA BSS and extend_brk 49 bytes
+2: start=0x796e000, end=0x79eb000, size=0x7d000     // RAMDISK
+</pre>
+<br><br>
+
+<code>cleanup_highmap();</code> 在 <a href="7-linux内核启动之进入C语言环境.html" target="_blank">7-linux内核启动之进入C语言环境.html</a> 里我们知道,不管你物理内存是多少,也不管你kernel的实际大小,pagetable直接map了512M内存. cleanup_highmap()就是要修正这个pagetable.<br>
+kernel的实际大小是从16M到_brk_end.更新后的map如下:
+<div id="pagetable" class="mar-btm"></div>
+<script>
+var level2_kernel_pgt = 0x81a09000,
+    _brk_end = 0x1d04049; // = 29M, 2M aligned = 30M
+                          // kernel size = 30 - 16 = 14M
+function buildLevel2(addr, perm, count, start) {
+    var entries = {};
+    for (i = start; i < count; i++) {
+        entries[i] = addr + i * 0x200000 + perm
+    }
+
+    return entries;
+}
+$('#pagetable').pagetable([
+    {
+        name: 'level2_kernel_pgt',
+        addr: level2_kernel_pgt,
+        entries: buildLevel2(0, 0x1e3, 30/2, 16/2)
+    }
+]);
+</script>
+
+<code>memblock.current_limit = get_max_mapped();</code> current_limit原来是0xffffffffffffffff,现在更正为0x20000000(512M)<br>
+<code>memblock_x86_fill();</code>把e820里的E820_RAM加到memblock.memory里,我们知道有两块内存的type是E820_RAM, 0x10-0x9f, 0x100-0x7ff0
+<pre>
+// bochs: writemem "/tmp/memblock.memdump" 0xffffffff81b3e9a0 64
+// bochs: writemem "/tmp/memblock.memory.memdump" 0xffffffff81b3f200 2048
+// bochs: writemem "/tmp/memblock.reserved.memdump" 0xffffffff81b3e9e0 2048
+
+$ ./print_memblock /tmp/memblock.memdump /tmp/memblock.memory.memdump /tmp/memblock.reserved.memdump
+sizeof(struct memblock) = 64
+sizeof memblock.memory/reserved = INIT_MEMBLOCK_REGIONS * sizeof(struct memblock_region) = 2048
+memblock.current_limit  = 0x20000000    // 512M
+memblock.memory_size    = 0x7f7f000     // (0x9f - 0x10) + (0x7ff0 - 0x100) = 0x7f7f
+memblock.memory.cnt     = 0x2
+memblock.memory.max     = 0x80
+memblock.memory.regions = 0xffffffff81b3f200
+memblock.reserved.cnt     = 0x3
+memblock.reserved.max     = 0x80
+memblock.reserved.regions = 0xffffffff81b3e9e0
+--memory regions--
+0: start=0x10000, end=0x9f000, size=0x8f000         // E820_RAM
+1: start=0x100000, end=0x7ff0000, size=0x7ef0000    // E820_RAM
+--reserved regions--
+0: start=0x9fc00, end=0x100000, size=0x60400        // EBDA
+1: start=0x1000000, end=0x1d04049, size=0xd04049    // Kernel TEXT DATA BSS and extend_brk 49 bytes
+2: start=0x796e000, end=0x79eb000, size=0x7d000     // RAMDISK
+</pre>
+<br>
+
+<code>early_reserve_e820_mpc_new();</code> enable_update_mptable是个全局变量,如果GRUB命令行里传了参数alloc_mptable,那么就会把它置为1.我们没有传这个参数,所以 enable_update_mptable=0, 然后这个函数就返回了,啥也没做.<br><br>
+
+
+<code>setup_bios_corruption_check();</code> 这个函数的作用其实就是要确保0-64K不能在memblock的memory regions里(注释里写的明白,假设前4K已经reserved了),具体实现是尝试在memory regions里找一块4K之后的内存,我们知道memory regions里第一块RAM是从0x10000-0x9f000,这一找就找到了,显然这块内存已经在64K后边了,所以接着就返回了.<br><br>
+
+接着在syslog里打印出了 initial memory mapped: 0 - 512M, 不知道这个有什么用处,我们已经知道 kernel_pgt map了16-30M的内存, ident_pgt map了0-1G的内存<br><br>
+
+<code>setup_trampolines();</code> 一直不太明白这个trampolines是做什么用的. trampoline_64.S 看起来像是cpu启动从16位到32位,再到64位的过程. setup_trampolines() 做的事就是在0-1M里找块内存(在memblock里reserve),把从 x86_trampoline_start 到 x86_trampoline_end 的内容都 copy 过来.
+<pre>
+// size = 0x5000 = 20K
+--reserved regions--
+0: start=0x9a000, end=0x9f000, size=0x5000          // TRAMPOLINE
+1: start=0x9fc00, end=0x100000, size=0x60400        // EBDA
+2: start=0x1000000, end=0x1d04049, size=0xd04049    // Kernel TEXT DATA BSS and extend_brk 49 bytes
+3: start=0x796e000, end=0x79eb000, size=0x7d000     // RAMDISK
+</pre>
+<br>
+
+<code>init_gbpages();</code> .config里定义了CONFIG_DIRECT_GBPAGES=y,所以 direct_gbpages = 1, 但 cpu_has_gbpages = 0, so direct_gbpages = 0<br><br>
+
+<code>max_low_pfn_mapped = init_memory_mapping(0, max_low_pfn&lt;&lt;PAGE_SHIFT);</code><br>
+<pre><code class="language-c">
+init_memory_mapping(0, 0x7ff0 000);
+    // syslog: init_memory_mapping: 0 - 0x7ff0 000
+
+    // init_memory_mapping的前一部分代码就是根据start end,计算出从哪到哪该用多大的page size. 计算结果都放在mr里.
+    // 最终 0-0x7e00 (2M) 0x7e00 - 0x7ff0 (4K)
+
+    // find_early_table_space(end, use_pse, use_gbpages), 这个函数根据end计算出后边 kernel_physical_mapping_init (alloc_low_page) 时需要多少 page table
+    // 确定下来 pgt_buf_start, pgt_buf_top, 并打印出来
+    // kernel direct mapping tables up to END @ pgt_buf_start - pgt_buf_top
+
+    kernel_physical_mapping_init();
+        phys_pud_init()
+            phys_pmd_init()
+                phys_pte_init()
+    // 这个函数大致看个明白,也就是根据参数 start, end, page_size_mask, 计算下需要几个pgd,几个pud,几个pmd,几个pte.
+    // 先说 0 - 0x7e00 (126M) page size 2M
+    // 当前的 virt address space(ffff880000000000 - ffffc7ffffffffff) 虽然是64TB, 但init_level4_pgt只在第272项上有map,也就是说支持512G内存
+    // 如果start到end超过了512G,就可要再alloc出一个pud,然后填充到第273项上去. 我们是126M,显然不需要, 即使是服务器, 咱基本上也接触不到 512G 内存的.
+    // 所以结果是pgd不用做任何改动,接着是pud,目前pud的第0项已经有了,也就是说如果start到end不超过1G,就不需要做调整,如果超过1G,那么每1G都要alloc出一个pmd,
+    // 然后加到pud的第1项,第2项...,我们是126M,也不需要做调整,下边是pmd, 当前的pmd里填满了,也就是说map了1GB的内存(2M page size),0-126M这63项都不动,
+    // 然后从126M开始,已经大于end了,那么后边的项全都清0.
+    // 再说0x7e00 - 0x7ff0 page size 4K
+    // pgd, pud 都一样, pmd时,因为前边我们已经将第64项清0了,所以这里要alloc一个新的pte,根据start和end做好map,然后填到第64项里.
+
+    最后,如果 pgt_buf_end > pgt_buf_start, 说明 alloc 了新 page table, 那么就要把这些 page table reserve到 memblock里.
+    如果 GRUB 命令行里指了参数 memtest, 还会做下 test, 怎么做的,先跳过去吧.
+
+使用print_memblock查看下:
+--reserved regions--
+0: start=0x9a000, end=0x9f000, size=0x5000          // TRAMPOLINE
+1: start=0x9fc00, end=0x100000, size=0x60400        // EBDA
+2: start=0x1000000, end=0x1d04049, size=0xd04049    // Kernel TEXT DATA BSS and extend_brk 49 bytes
+3: start=0x796e000, end=0x79eb000, size=0x7d000     // RAMDISK
+4: start=0x7fed000, end=0x7fee000, size=0x1000      // **THE PTE**
+</code></pre>
+
+<p class="bg-success pad-all text-lg">
+    OK, 到此, 我们告一阶段性胜利了!!!<br>
+    总结一下 memory 及其 mapping:<br>
+    1. 通过GRUB提供的e820 map, 我们知道了实际内存的大小, 以及哪些内存块可以使用,哪些内存块是RESERVED<br>
+    2. 通过memblock,我们初步管理了内存,现在已经知道了在可用的内存范围内,哪些内存块是kernel要保留下来的,哪些是可以自由使用的<br>
+    3. 真正意义的pagetable终于建立起来了, kernel_pgt 从16M到30M(2M page size), ident_pgt从0到126M(page size 2M), 从126M到0x7ff0 000(page size 4K)
+</p>
+
+<div id="pagetable-2" class="mar-btm pagetable"></div>
+<script>
+var init_level4_pgt = 0x81a03000,
+    level3_ident_pgt = 0x81a04000,
+    level3_kernel_pgt = 0x81a05000,
+    level2_fixmap_pgt = 0x81a06000,
+    level1_fixmap_pgt = 0x81a07000,
+    level2_ident_pgt = 0x81a08000,
+    level2_kernel_pgt = 0x81a09000,
+    level2_spare_pgt = 0x81a0a000,
+    __START_KERNEL_map = 0x80000000,
+    _KERNPG_TABLE = 0x63,
+    _PAGE_TABLE = 0x67;
+function buildLevel2(addr, perm, count, start) {
+    var entries = {};
+    for (i = start; i < count; i++) {
+        entries[i] = addr + i * 0x200000 + perm
+    }
+
+    return entries;
+}
+function buildLevel1(addr, perm, count, start) {
+    var entries = {};
+    for (i = start; i < count; i++) {
+        entries[i] = addr + i * 0x1000 + perm
+    }
+
+    return entries;
+}
+$('#pagetable-2').pagetable([
+    {
+        name: 'init_level4_pgt',
+        addr: init_level4_pgt,
+        entries: {
+            0: 'NULL pointer',
+            272: level3_ident_pgt - __START_KERNEL_map + _KERNPG_TABLE,
+            511: level3_kernel_pgt - __START_KERNEL_map + _PAGE_TABLE
+        }
+    },
+    // kernel pgt
+    {
+        name: 'level3_kernel_pgt',
+        addr: level3_kernel_pgt,
+        entries: {
+            510: level2_kernel_pgt - __START_KERNEL_map + _KERNPG_TABLE,
+            511: level2_fixmap_pgt - __START_KERNEL_map + _PAGE_TABLE
+        }
+    },
+    {
+        name: 'level2_kernel_pgt',
+        addr: level2_kernel_pgt,
+        entries: buildLevel2(0, 0x1e3, 30/2, 16/2)
+    },
+    // direct mappings
+    {
+        name: 'level3_ident_pgt',
+        addr: level3_ident_pgt,
+        entries: {
+            0: level2_ident_pgt - __START_KERNEL_map + _KERNPG_TABLE
+        }
+    },
+    {
+        name: 'level2_ident_pgt',
+        addr: level2_ident_pgt,
+        entries: (function () {
+            var entries = buildLevel2(0, 0x1e3, 126/2, 0);
+            entries[63] = 0x7fed000 + _KERNPG_TABLE;
+            return entries;
+        })()
+    },
+    {
+        name: 'level1 ident pgt (pte) 4K',
+        addr: 0x7fed000,
+        entries: buildLevel1(0x7e00000, 0x163, 0x7ff0 - 0x7e00, 0)
+    }
+]);
+</script>
+
+<code>max_pfn_mapped = max_low_pfn_mapped;</code> max_pfn_mapped 之前一直是写死的 512M, 现在终于更新成对的值了, 0x7ff0. <br><br>
+
+<pre><code class="language-c">#ifdef CONFIG_X86_64
+	if (max_pfn > max_low_pfn) {
+		max_pfn_mapped = init_memory_mapping(1UL&lt;&lt;32,
+						     max_pfn&lt;&lt;PAGE_SHIFT);
+		/* can we preseve max_low_pfn ?*/
+		max_low_pfn = max_pfn;
+	}
+#endif
+	memblock.current_limit = get_max_mapped();</code></pre>
+如果内存大于4G的话,接着init_memory_mapping,根据上边对init_memory_mapping的了解,显然每多出1个G,至少要多出一个pmd,而最后不够2M的内存,按page size 4K,至少也要多出一个pte.<br><br>
+
+
+<code>reserve_initrd();</code> 前边在 <a href="9-x86_64_start_kernel.html" target="_blank">9-x86_64_start_kernel.html</a> 里我们已经 reserve 过initrd了, 并且GRUB会把initrd加载到接近896M内存的位置,所以这个函数最终就是赋值了两个全局变量: initrd_start, initrd_end.<br><br>
+
+<code>reserve_crashkernel();</code> 这个函数在 GRUB 命令行里寻找参数 crashkernel= , 我们没有传这个参数, 所以这个函数早早的就返回了. 如果传了的话,会在 memblock里reserve一块内存.<br><br>
+
+<code>vsmp_init();</code> 这个彻底不清楚是什么东西,不过在bochs里追踪代码运行过程倒是挺简单的, read_pci_config 返回值不是期望的, 所以 is_vsmp = 0, 然后就返回了.<br><br>
+
+
+<code>io_delay_init();</code> io_delay_override = 0 (这是个全局变量,未初始化的,是0). so dmi_check_system(io_delay_0xed_port_dmi_table);<br>
+我们前边 dmi_scan_machine 时已经知道 DMI_BOARD_* 全都为0, 所以 dmi_matches 始终都返回false, for循环结束后count=0, dmi_check_system 也返回了, 所以这个函数啥都没做.<br><br>
+
+<code>acpi_boot_table_init();</code>
+<pre>
+    dmi_check_system(acpi_dmi_table); // acpi_dmi_table是个黑名单,列在这里边的主板和BIOS都是有问题的,我们已经知道 DMI_BOARD_* 全都为0, 所以Bochs不在这个黑名单里. 从而 acpi_disabled = 0
+</pre>
+<blockquote>
+    // @see http://wiki.osdev.org/ACPI <br><br>
+
+    There are 2 main parts to ACPI. The first part is the tables used by the OS for configuration during boot (these include things like how many CPUs, APIC details, NUMA memory ranges, etc). The second part is the run time ACPI environment, which consists of AML code (a platform independent OOP language that comes from the BIOS and devices) and the ACPI SMM (System Management Mode) code.<br><br>
+
+    To begin using ACPI, the operating system must look for the RSDP (Root System Description Pointer). This is covered in RSDP because it is too verbose to put here.<br><br>
+
+If the RSDP is found and the verification is valid, it contains a pointer to the RSDT (Root System Description Table) and for newer versions of ACPI (ACPI 2.0 and later) there is an additional XSDT (eXtended System Description Table). Both the RSDT and the XSDT contain pointers to other tables. The only real difference between the RSDT and the XSDT is that the XSDT contains 64 bit pointer instead of 32 bit pointers.
+</blockquote>
+<pre><code class="language-c">
+    acpi_table_init();
+        acpi_initialize_tables(initial_tables, ACPI_MAX_TABLES, 0);
+            static struct acpi_table_desc initial_tables[128]; // addr 0x1b40270
+            struct acpi_table_list acpi_gbl_root_table_list = {
+                struct acpi_table_desc *tables;	/* Table descriptor array */        // = initial_tables
+                u32 current_table_count;	/* Tables currently in the array */
+                u32 max_table_count;	/* Max tables array will hold */            // = 128
+                u8 flags;                                                           // = ACPI_ROOT_ORIGIN_UNKNOWN
+            };
+            rsdp_address = acpi_os_get_root_pointer();                              // = 0xfa6a0
+            // 我们写个小程序打印出来rsdp
+            // bochs writemem "/tmp/acpi_table_rsdp.memdump" 0xffff8800000fa6a0 40
+            // ./print_acpi_table_rsdp /tmp/acpi_table_rsdp.memdump
+            /*      sizeof(struct acpi_table_rsdp) = 40
+                    signature   = RSD PTR
+                    checksum    = 0x4c
+                    oem_id      = BOCHS
+                    revision    = 0
+                    rsdt_physical_address   = 0x7ff0000 // 看前边有e820 map, 0x7ff0000-0x8000000, size=0x1000=64K type=E820_ACPI
+                    length                  = 0
+                    xsdt_physical_address   = 0
+                    extended_checksum       = 0
+                    reserved[3] = 0 0 0
+            */
+            acpi_tb_parse_root_table(rsdp_address);
+                acpi_tb_print_table_header(rsdp_address,
+                               ACPI_CAST_PTR(struct acpi_table_header,
+                                     rsdp));
+                // 在我的电脑上syslog里打印出 ACPI: RSDP 00000000000fa790 00024 (v02 ACPIAM)
+                // 在bochs里应该打印出 ACPI: RSDP 000...fa6a0 00020 (v00 BOCHS)
+            // 接下来就要查看 rsdt 了, 上边我们知道 rsdt_physical_address = 0x7ff0 000, 可以前边 init_memory_mapping 时,我们把 pagetable 给修正了
+            // 所以现在 0x7ff0 000 处的内存不在 pagetable 里, bochs 又不支持 dump phys addr memory, 怎么办呢?
+            // 我们重启下bochs, break point 设在 setup_arch 处, 这时 page table 还没有修正, 就可以访问了
+            // bochs writemem "/tmp/acpi_table_header.memdump" 0xffff880007ff0000 36
+                acpi_tb_print_table_header(address, table);
+            // ./print_acpi_table_header /tmp/acpi_table_header.memdump
+            /*  sizeof(struct acpi_table_header) = 36
+                header.signature    = RSDT
+                header.length       = 48
+                header.revision     = 1
+                header.checksum     = 0xf2
+                header.oem_id       = BOCHS
+                oem_table_id        = BXPCRSDT
+                header.oem_revision = 1
+                header.asl_compiler_id = BXPC
+                header.asl_compiler_revision = 1
+            */
+            // bochs里会在syslog里打印出 ACPI: RSDT 0000...7ff0000 00030 (v01 BOCHS BXPCRSDT 00000001 BXPC 00000001)
+            table_count = (table->length - sizeof(struct acpi_table_header)) / table_entry_size
+                        = (48 - 36) / sizeof(u32) = 12 / 4 = 3
+            table_entry = table + sizeof(struct acpi_table_header) = 0x7ff0000 + 36 = 0x7ff0024
+            acpi_gbl_root_table_list.current_table_count = 2
+            // 接下来一个for循环,填充 acpi_gbl_root_table_list.tables, 0x7ff0024开始后边每4个字节是一个table指针,最终:
+            // (特别注意 "FACP" == ACPI_SIG_FADT, acpi_tb_parse_fadt里把FACP copy 到了 acpi_gbl_FADT,并且install table DSDT FACS)
+            /*  tables[0].address = 0x7ff0100 (DSDT)    // Differentiated System Description Table
+                tables[1].address = 0x7ff00c0 (FACS)    // Firmware ACPPI Control Structure
+                tables[2].address = 0x7ff0030 (FACP)    // Fixed ACPI Description Table
+                tables[3].address = 0x7ff0f28 (APIC)    // Multiple APIC Description Table
+                tables[4].address = 0x7ff0ef1 (SSDT)    // Secondary System Description Table
+                acpi_gbl_root_table_list.current_table_count = 5
+            */
+            // 最后, 调用 acpi_tb_install_table 将 FACP, APIC, SSDT 这三个table的
+            //  address, length, flag = ACPI_TABLE_ORIGIN_MAPPED, signature
+            //  都 copy 到 initial_tables 里. 并打印出这三个table的详细情况.
+            initial_tables = 0x1b40270; // bochs view memory break point 0x1b12b49
+            acpi_gbl_FADT  = 0x1ceea80;
+            // 最后,我们把 acpi_gbl_root_table_list 和 initial_tables 打印出来看看
+            // bochs writemem "/tmp/root_table_list.memdump" 0xffffffff81ceea20 24
+            // bochs writemem "/tmp/initial_tables.memdump" 0xffffffff81b40270 4096
+            /* ./print_acpi_gbl_root_table_list /tmp/root_table_list.memdump /tmp/initial_tables.memdump
+                    sizeof(struct acpi_table_list acpi_gbl_root_table_list) = 24
+                    sizeof(struct acpi_table_desc initial_tables[128]) = 4096
+                    root_table_list.current_table_count = 5
+                    root_table_list.max_table_count = 128
+                    root_table_list.flags = 0
+                    tables:
+                     0: address = 0x7ff0100
+                        pointer = (nil)
+                        length  = 3569
+                        signature = DSDT
+                        owner_id = 0
+                        flags    = 0x1
+                     1: address = 0x7ff00c0
+                        pointer = (nil)
+                        length  = 64
+                        signature = FACS
+                        owner_id = 0
+                        flags    = 0x1
+                     2: address = 0x7ff0030
+                        pointer = (nil)
+                        length  = 116
+                        signature = FACP
+                        owner_id = 0
+                        flags    = 0x1
+                     3: address = 0x7ff0f28
+                        pointer = (nil)
+                        length  = 74
+                        signature = APIC
+                        owner_id = 0
+                        flags    = 0x1
+                     4: address = 0x7ff0ef1
+                        pointer = (nil)
+                        length  = 55
+                        signature = SSDT
+                        owner_id = 0
+                        flags    = 0x1
+            */
+        check_multiple_madt();
+            // check_multiple_madt()的注释里写的很清楚,大多数BIOS只提供一个APIC,正如前边我们看到的,但是有些会提供2个,这种情况下可以通过GRUB命令行参数指明使用哪一个
+            // 对一个的情况, acpi_apic_instance = 0
+</code></pre>
+
+<blockquote>
+<b>DSDT</b><br>
+DSDT stands for Differentiated System Description Table. It Is a major ACPI table and is used to describe what peripherals the machine has. Also holds information on PCI IRQ mappings and power management. For example when powering down by the OS, it should find the _S5 object which describes how to do that.<br><br>
+
+<b>Purpose of DSDT</b><br>
+When your OS boots, it should parse the memory for ACPI tables. Then locate DSDT (and other tables as well, like SSDT), and decode it to get the list of installed devices. If you have that list, it's rather easy to load device driver for each.
+Also note that there are buggy tables, so you should always keep the possibility to load DSDT data from a user provided file instead. This file could be located in your initial ramdisk, loaded with your kernel along on boot. That would solve the chicken-egg problem of loading the DSDT file from a device that's IO addresses are defined in the DSDT.<br><br>
+
+<b>SSDT</b><br>
+It is encoded in AML in exactly the same way as the DSDT. It acts as a supplement to the DSDT.<br><br>
+
+<b>FACP(FADT)</b><br>
+FADT (Fixed ACPI Description Table) is a data structure used in the ACPI programming interface. This table contains information about fixed register blocks pertaining to power management.<br><br>
+
+<b>APIC (MADT Multiple APIC Description Table)</b><br>
+The MADT describes all of the interrupt controllers in the system. It can be used to enumerate the processors currently available.
+</blockquote>
+
+<pre><code class="language-c">
+acpi_table_parse(ACPI_SIG_BOOT, acpi_parse_sbf);
+    // 前边我们已经知道 acpi_apic_instance = 0, 所以 acpi_table_parse 的逻辑就统一了
+    // 它调用 acpi_get_table_with_size(signature, 0, &table, &tbl_size) 从 acpi_gbl_root_table_list.tables 里取到相应的 table
+    // 然后在这个table上调用对应的处理函数 acpi_table_handler
+    // 猛一看好像有点奇怪, acpi_get_table_with_size 里没有看到 acpi_os_map_memory 呀,但为什么 handler(table) 之后会有 early_acpi_os_unmap_memory 呢?
+    // acpi_os_map_memory 的调用在 acpi_tb_verify_table 里, 前边打印 initial_tables 时,我们知道 table->pointer = (nil)
+    // 并且table.flags = 0x1, ACPI_TABLE_ORIGIN_MASK = 7 = 0x0111, & 之后 = 0x1 = ACPI_TABLE_ORIGIN_MAPPED
+    // 所以在 acpi_tb_verify_table 里 map 了memory并设了 pointer
+    // 我们知道没有 BOOT table, 所以这个函数找不到table,就啥都做不了了
+
+// 接着下边 acpi_blacklisted() 又有一个黑名单, 如果在这个黑名单里, acpi_disabled = 1;
+</code></pre>
+<br>
+
+<code>early_acpi_boot_init();</code>
+<pre><code class="language-c">
+    early_acpi_process_madt();
+        acpi_table_parse(ACPI_SIG_MADT, acpi_parse_madt); // ACPI_SIG_MADT "APIC"
+        // 前边我们已经知道 APIC 在 0x7ff0f28 处了, 一样的办法, 把 break point 设到 setup_arch 处, 然后打印出来 madt 看看
+        // bochs writemem "/tmp/acpi_table_madt.memdump" 0xffff880007ff0f28 44
+        /* ./print_acpi_table_madt /tmp/acpi_table_madt.memdump
+            sizeof(struct acpi_table_madt) = 44
+            madt.header.signature    = APIC
+            madt.header.length       = 74
+            madt.header.revision     = 1
+            madt.header.checksum     = 0xce
+            madt.header.oem_id       = BOCHS
+            madt.header.oem_table_id = BXPCAPIC
+            madt.header.oem_revision = 1
+            madt.header.asl_compiler_id   = BXPC
+            madt.header.asl_compiler_revision = 1
+            madt.address = 0xfee00000
+            madt.flags = 0x1
+        */
+        acpi_lapic_addr = 0xfee00000
+        // syslog 打印出 ACPI: Local APIC address 0xfee00000
+        default_acpi_madt_oem_check(madt->header.oem_id, madt->header.oem_table_id);
+            apic[i]->acpi_madt_oem_check(oem_id, oem_table_id); // apic[i] => &apic_physflat
+                // => physflat_acpi_madt_oem_check
+                // 用到了 acpi_gbl_FADT, 打印出来看看
+                // bochs writemem "/tmp/acpi_gbl_FADT.memdump" 0xffffffff81ceea80 36
+                /* ./print_acpi_table_header /tmp/acpi_gbl_FADT.memdump
+                    sizeof(struct acpi_table_header) = 36
+                    header.signature    = FACP
+                    header.length       = 244
+                    header.revision     = 1
+                    header.checksum     = 0x4b
+                    header.oem_id       = BOCHS
+                    header.oem_table_id = BXPCFACP
+                    header.oem_revision = 1
+                    header.asl_compiler_id   = BXPC
+                    header.asl_compiler_revision = 1
+                */
+                #define FADT2_REVISION_ID 3
+                // physflat_acpi_madt_oem_check 返回 0
+        // default_acpi_madt_oem_check 返回 0
+        // acpi_table_parse 返回 0
+        early_acpi_parse_madt_lapic_addr_ovr();
+            acpi_table_parse_madt(
+                ACPI_MADT_TYPE_LOCAL_APIC_OVERRIDE, // enum acpi_madt_type id
+                acpi_parse_lapic_addr_ovr,          // acpi_table_entry_handler handler
+                0                                   // unsigned int max_entries
+            );
+                acpi_table_parse_entries(
+                    ACPI_SIG_MADT,                  // APIC
+                    sizeof(struct acpi_table_madt), // 44
+                    id,                             // ACPI_MADT_TYPE_LOCAL_APIC_OVERRIDE = 5
+                    handler,                        // acpi_parse_lapic_addr_ovr
+                    max_entries                     // 0
+                );
+                    table_end = table_header + table_header->length;
+                    entry = table_header + table_size;
+                    // table_header->length = 74
+                    // table_size = 44
+                    // entry 74 - 44 = 30
+
+                    // table_header                entry                    table_end
+                    // |______________________________|______________________|
+                    // 0                             44                       74
+
+                    struct acpi_subtable_header {
+                        u8 type;
+                        u8 length;
+                    };
+
+                    // 0x7ff0f28 + 44 = 0x7ff0f54
+                    // entry 1: type = 0, length = 8, [00 00 01 00 00 00]
+                    // entry 2: type = 1, length = 0xc, [01 00 00 00 C0 FE 00 00 00 00]
+                    // entry 3: type = 2, length = 0xa, [00 00 02 00 00 00 00 00]
+                // 由于没有entry->type == 5, acpi_table_parse_entries 就简单的返回 0, 结束了
+            // acpi_table_parse_madt 返回 0
+            register_lapic_address(acpi_lapic_addr);
+                mp_lapic_addr = acpi_lapic_addr = 0xfee00000
+                // x2apic_mode = 0, so
+                set_fixmap_nocache(FIX_APIC_BASE = 0x803, 0xfee00000);
+                    pv_mmu_ops.set_fixmap => native_set_fixmap
+                    __native_set_fixmap (0x803, 0x80000000FEE0017B)
+                        set_pte_vaddr(0xFFFFFFFFFF5FC000, 0x80000000FEE0017B)
+                        // 0xFFFFFFFFFF5FC000 pgd(511) pud(511) pmd(506) pt(508)
+                        // 前边 early_ioremap_init() 时已经将 level2_fixmap_pgt 的 506 项指向了 bm_pte
+                        // set_pte_vaddr后, 它的508项map到了 0x80000000FEE0017B
+                // 所以set_fixmap_nocache的作用就是把 0xfee00000 做好map,以便访问
+                boot_cpu_physical_apicid  = read_apic_id();
+                    reg = apic_read(APIC_ID);
+                        // => native_apic_mem_read(APIC_ID);
+                        // => *(u32 *)(APIC_BASE + APIC_ID)
+                        //      = *(fix_to_virt(FIX_APIC_BASE) + 0x20)
+                        //      = *(FIXADDR_TOP - (FIX_APIC_BASE &lt;&lt; PAGE_SHIFT) + 0x20)
+                        //      = *(0xffffffffffdff000 - 0x803000 + 0x20)
+                        //      = *(0xffffffffff5fc000) = 0
+                        // 为什么即使做了map还是无法访问 0xffffffffff5fc000 ? 看下边的 blockquote
+                    apic->get_apic_id(reg);
+                boot_cpu_physical_apicid = 0;
+                    apic_read(APIC_LVR) = 0x50014
+                apic_version[0] = 0x14
+    acpi_lapic = 1
+    smp_found_config = 1
+</code></pre>
+
+<blockquote>
+@see http://wiki.osdev.org/APIC <br><br>
+In an APIC-based system, each CPU is made of a "core" and a "local APIC". The local APIC is responsible for handling cpu-specific interrupt configuration.<br><br>
+The local APIC's registers are memory-mapped in physical page FEE00xxx.<br><br>
+The local APIC registers are memory mapped to an address that can be found in the MP/MADT tables. Make sure you map these to virtual memory if you are using paging. Each register is 32 bits long, and expects to written and read as a 32 bit integer. Although each register is 4 bytes, they are all aligned on a 16 byte boundary.<br><br>
+
+@see AMD64-Volume2 15.29.1.1 Local APIC Register Access
+</blockquote>
+<br><br>
+
+<code>initmem_init();</code> @see arch/x86/mm/numa_64.c#0627
+<pre><code class="language-c">
+numa_off = 0; // @see arch/x86/mm/numa.c#0008 如果GRUB命令行里明确传了参数 numa=off, 那么 numa_off 才会 = 1
+
+// numa_off = 0 的话,那么有三个init_func可选, 如果 x86_acpi_numa_init 不行的话,尝试 amd_numa_init, 还不行的话, 用 dummy_numa_init
+// numa_init的开头是一些初始化的代码,但是如果 init_func 不行的话, 这些都白搭, 所以我们先一个个看 init_func
+
+x86_acpi_numa_init();
+// 这个init_func调用acpi_numa_init(),后者尝试寻找并parse acpi_table SRAT, SLIT, 我们知道没有这两个table
+// 所以acpi_numa_init()返回 -ENOENT = -2, 进而 x86_acpi_numa_init() 返回 -2
+// 用bochs跟踪执行会看到 numa_int(x86_acpi_numa_init) = 0xFFFFFFFE, 没错 0xFFFFFFFE 就是 -2, 写个c程序printf("%d", 0xFFFFFFFE)验证下就知道了
+
+amd_numa_init();
+// 这个init_func调用find_northbridge(),后者read_pci_config尝试寻找PCI_VENDOR_ID_AMD
+// bochs跟踪执行会看到没有找到,然后也返回 -ENOENT, 这下就只能用 dummy_numa_init 了
+// 关于PCI及PCI Express:
+// @see http://wiki.osdev.org/PCI
+// @see http://wiki.osdev.org/PCI_Express
+
+dummy_numa_init();
+// 这个init_func一开始先打印出
+//  No NUMA configuration found
+//  Faking a node at 0 - max_pfn (0x7ff0 000)
+// 然后在 numa_nodes_parsed里,把0给设上,表示第0个node parsed(这是个bitmap,调用init_func之前,numa_init已经把它清空了)
+// 再然后 把 0 - 0x7ff0000 这个内存范围记录到 numa_meminfo 里.
+// 最终 dummy_numa_init()　做的事就是在 numa_meminfo 里记录一下,　node 0有一块内存,范围从0到0x7ff0000.
+// (根据.config配置,最多有64个node,最多有64*2=128个内存分块)
+// numa_meminfo 0x1b378e0
+
+// --------------------------------
+
+struct numa_memblk {
+	u64			start;
+	u64			end;
+	int			nid;
+};
+
+struct numa_meminfo {
+	int			nr_blks;
+	struct numa_memblk	blk[NR_NODE_MEMBLKS]; // NR_NODE_MEMBLKS = 64 * 2 = 128
+};
+
+numa_cleanup_meminfo(&numa_meminfo);
+// 上边 dummy_numa_init 已经在 numa_meminfo 里记录了node 0(0-0x7ff0000), 但 numa_meminfo.blk[128] 还有127个blk是未设置的
+// cleanup_meminfo做的事就是把余下的127个blk设为 start = end = 0, nid = NUMA_NO_NODE
+// 这样 numa_meminfo 明确地表示了只有一个node,从0-0x7ff0000
+
+numa_emulation(&numa_meminfo, numa_distance_cnt); // 由于 .config 里没有设置 CONFIG_NUMA_EMU, 所以这是个空函数,跳过
+
+numa_register_memblks(&numa_meminfo);
+    memnode_shift = compute_hash_shift(mi);
+    // 看似是要计算出一个shift值(如果numa_meminfo.blk只有一个的话,我们就是这种情况,这个值固定是63)
+    // 把physical_addr &gt;&gt; shift 得到的结果就是所处的node
+
+    struct node_active_region {
+        unsigned long start_pfn;
+        unsigned long end_pfn;
+        int nid;
+    }
+    memblock_x86_register_active_regions(0, 0, 0x7ff0);
+    sort_node_map();
+    /* early_node_map 0x1aae220
+        start_pfn       end_pfn     nid
+        0x10            0x9f        0
+        0x100           0x7ff0      0
+    */
+    numa_meminfo记录了从0-max_pfn, memblock.memory记录了从e820时拿到的E820_RAM,结合两者,得到 early_node_map
+
+    numa_meminfo_cover_memory(mi);
+    // 计算 early_node_map 里的 hole_size (0x100 - 0x9f + 0x10 - 0) 和 memblock.memory 里的 hole_size
+    // 如果两者相差超过1M,则报警
+
+    setup_node_bootmem(0, 0, 0x7ff0000);
+        // 首先打印出 Initmem setup node 0 0x0-0x7ff0000
+        node_data[0] = early_node_mem(0, 0, 0x7ff0000, pgdat_size, SMP_CACHE_BYTES);
+        // 找一块内存,够放得下一个pg_data_t,在memblock里reserve (0x7fe8000-0x7fed000)
+        // 打印出 node_data[0] (pg_data_t) 的物理地址开始到结束
+        nid = phys_to_nid(nodedata_phys);
+        // 就是上边说的那个shift验证,node_data[0]是不是在一个node上
+        // 然后初始化这个pg_data_t
+        node_data[0].node_id = 0;
+        node_data[0].node_start_pfn = 0;
+        node_data[0].node_spanned_pages = 0x7ff0;
+
+        // node_data 在 arch/x86/mm/numa_64.c#0027 里定义
+        struct pglist_data *node_data[MAX_NUMNODES] __read_mostly;
+        // 显然在一个NUMA的系统里,内存管理的最顶层就从这个node_data开始,每一个node都有一个对应 pglist_data
+</code></pre>
+总结下,initmem_init()的代码看的不是很明白,因为对NUMA了解的不多.结果就是弄了一个dummy_node 0,并给它分配了内存(reserve在memblock里),也做了初始化.<br>
+我们再打印下memblock,然后还需要写个程序打印下node_data[0].
+<pre>
+// bochs: writemem "/tmp/memblock.memdump" 0xffffffff81b3e9a0 64
+// bochs: writemem "/tmp/memblock.memory.memdump" 0xffffffff81b3f200 2048
+// bochs: writemem "/tmp/memblock.reserved.memdump" 0xffffffff81b3e9e0 2048
+
+./print_memblock /tmp/memblock.memdump /tmp/memblock.memory.memdump /tmp/memblock.reserved.memdump
+sizeof(struct memblock) = 64
+sizeof memblock.memory/reserved = INIT_MEMBLOCK_REGIONS * sizeof(struct memblock_region) = 2048
+memblock.current_limit  = 0x7ff0000
+memblock.memory_size    = 0x7f7f000
+memblock.memory.cnt     = 0x2
+memblock.memory.max     = 0x80
+memblock.memory.regions = 0xffffffff81b3f200
+memblock.reserved.cnt     = 0x5
+memblock.reserved.max     = 0x80
+memblock.reserved.regions = 0xffffffff81b3e9e0
+--memory regions--
+0: start=0x10000, end=0x9f000, size=0x8f000
+1: start=0x100000, end=0x7ff0000, size=0x7ef0000
+--reserved regions--
+0: start=0x9a000, end=0x9f000, size=0x5000          // TRAMPOLINE
+1: start=0x9fc00, end=0x100000, size=0x60400        // EBDA
+2: start=0x1000000, end=0x1d04049, size=0xd04049    // Kernel TEXT DATA BSS and extend_brk 49 bytes
+3: start=0x796e000, end=0x79eb000, size=0x7d000     // RAMDISK
+4: start=0x7fe8000, end=0x7fee000, size=0x6000      // THE PTE (0x1000) and **this node_data[0] pglist_data (0x5000)**
+
+// bochs: writemem "/tmp/node_data.memdump" 0xffff880007fe8000 0x5000
+
+./print_node_data /tmp/node_data.memdump
+sizeof(struct pglist_data) = 0x4100
+node_data.node_id               = 0
+node_data.node_start_pfn        = 0
+node_data.node_spanned_pages    = 0x7ff0
+</pre>
+<br>
+
+<code>memblock_find_dma_reserve();</code>
+<pre><code class="language-c">mem_size_pfn = (0x1000 - 0x100) + (0x9f - 0x10) = 0xf8f
+free_size_pfn = (0x1000 - 0x100) + (0x9a - 0x10) = 0xf8a
+dma_reserve = 0xf8f - 0xf8a = 0x5 // TRAMPOLINE
+</code></pre>
+
+<code>dma32_reserve_bootmem();</code> 这个函数 defined(CONFIG_X86_64) && !defined(CONFIG_NUMA) 的情况下才有, 我们 CONFIG_NUMA=y, so skip.<br><br>
+
+<code>kvmclock_init();</code> 不知道这个函数是干什么的,它调用kvm_para_available(),后者使用cpuid检查KVM_CPUID_SIGNATURE,跟踪执行发现没有这个signature,然后就返回了.<br><br>
+
+<code>paging_init();</code>
+<pre><code class="language-c">x86_init.paging.pagetable_setup_start(swapper_pg_dir); // => x86_init_pgd_noop
+paging_init();
+x86_init.paging.pagetable_setup_done(swapper_pg_dir); // => x86_init_pgd_noop
+</code></pre>
+<div class="mar-lft">
+    <code>sparse_memory_present_with_active_regions(MAX_NUMNODES);</code>
+    <pre><code class="language-c">/*
+    前边我们已经知道 early_node_map 里有两个 node_active_region: 0x10-0x9f, 0x100-0x7ff0
+    sparse_memory_present_with_active_regions 做的事就是对这两个region调用 memory_present
+*/
+memory_present(0, 0x10, 0x9f);
+memory_present(0, 0x100, 0x7ff0);
+    sparse_index_init(section, nid); // 分配一个page存储struct mem_section
+    set_section_nid(section, nid); // => 空函数,不产生任何实际指令
+
+虽然不清楚 SPARSEMEM 的背景,但是通过上边的代码我们知道: SPARSEMEM将内存分为一个个SECTION,每个SECTION大小为128M.
+每个section使用一个struct mem_section管理,在分配struct mem_section时,不是一个一个分配的,而是一下子分配一个page,
+这个page可以保存下128个section, sizeof(struct mem_section) = 32, 32 * 128 = 4096,从而一个page的mem_section可以管理128*128M=16G内存.
+
+我们知道当前kernel设定的最大内存是64TB, 64TB = 16G * 4096, 也就是说,要管理这64TB内存, 需要分配4096个page来存储mem_section.
+当然不会预先分配好的,都是需要时才分配的, 所以全局变量
+// NR_SECTION_ROOTS = NR_MEM_SECTIONS / SECTIONS_PER_ROOT = (1 << (46 - 27)) / 128 = 4096
+struct mem_section *mem_section[NR_SECTION_ROOTS];
+是个指针数组, 0-16G的这个page就是mem_section[0], 16-32G就是mem_section[1];
+
+SECTION_SIZE_BITS = 27
+PFN_SECTION_SHIFT = 27 - 12 = 15
+PAGES_PER_SECTION = 1 &lt;&lt; 15 = 0x8000
+SECTIONS_PER_ROOT = PAGE_SIZE / sizeof (struct mem_section) = 0x1000 / 32 = 128
+
+struct mem_section {
+    unsigned long section_mem_map; // 第1位表示 SECTION_PRESENT, 第3位开始是 nid
+    unsigned long *pageblock_flags;
+    struct page_cgroup *page_cgroup;
+    unsigned long pad;
+}; // size = 32
+
+/*
+    回到 memory_present, memory_present做的事就是计算出指定的start,end是哪个section的,
+    我们的两个region都在128M以内,所以都属于第1个section,但是第1个SECTION_ROOT此时尚未分配,于是分配一个page,
+    这个page的前32个字节就是我们这两个region对应的mem_section,然后在 section_mem_map 上标记这个SECTION是属于node 0的,并且PRESENT了
+    通过bochs查看的话, mem_section[0] = 0x7fef000, 0x7fef000的前8个字节对应 section_mem_map = 0x1, 表示node 0, PRESENT
+    ./print_memblock
+        --reserved regions--
+        0: start=0x9a000, end=0x9f000, size=0x5000          // TRAMPOLINE
+        1: start=0x9fc00, end=0x100000, size=0x60400        // EBDA
+        2: start=0x1000000, end=0x1d04049, size=0xd04049    // Kernel TEXT DATA BSS and extend_brk 49 bytes
+        3: start=0x796e000, end=0x79eb000, size=0x7d000     // RAMDISK
+        4: start=0x7fe8000, end=0x7fee000, size=0x6000      // THE PTE (0x1000) and this node_data[0] pglist_data (0x5000)
+        5: start=0x7fef000, end=0x7ff0000, size=0x1000      // **mem_section[0]**
+*/</code></pre>
+
+    <code>sparse_init();</code>
+    <pre><code class="language-c">这个函数共分为4部分:
+/*
+    第1部分遍历64TB内存的所有section,找出present的,我们128M内存的情况只有第1个section是present的,有几个section就分配几个usemap
+    分配的usemap的地址存放在usemap_map里,显然usemap_map是个大的指针数组,因为它要给每个section都预留一个指针的位置.(64TB / 128M * 8 = 4M)
+    usemap的大小是0x18=24个字节
+*/
+    ./print_memblock
+        --reserved regions--
+        0: start=0x9a000, end=0x9f000, size=0x5000          // TRAMPOLINE
+        1: start=0x9fc00, end=0x100000, size=0x60400        // EBDA
+        2: start=0x1000000, end=0x1d04049, size=0xd04049    // Kernel TEXT DATA BSS and extend_brk 49 bytes
+        3: start=0x796e000, end=0x79eb000, size=0x7d000     // RAMDISK
+        4: start=0x7be8000, end=0x7fee000, size=0x406000    // **usemap_map** and
+                                                            //  THE PTE (0x1000) and
+                                                            //  this node_data[0] pglist_data (0x5000)
+        5: start=0x7feefc0, end=0x7feefd8, size=0x18        // **usemap_map[0] 第1个section的usemap**
+        6: start=0x7fef000, end=0x7ff0000, size=0x1000      // mem_section[0]
+/*
+    第2部分也是遍历64TB内存的所有section,找出present的,有几个present的section就分配几个map,分配的map地址存放在map_map里.
+    但和第1部分不同的是,这次不是简单的分配内存,分配的内存要用作一个struct page数组,
+    上边我们知道,一个section是128M,也就是0x8000个page,所以这个map其实就是struct page map[0x8000]
+    sizeof(struct page) * 0x8000 = 56 * 0x8000 = 1792K, ALIGN PMD_SIZE后, = 2M
+    还有一点不同的是,usemap的地址是ident_pgt的地址,但map的地址却是virtual memory 0xffffea0000000000 (这个地址我们还没有做map),
+    至于为什么要这么做,还不清楚. 由于这个地址范围我们还没有做map,那么就要先做好page table
+
+    ./calc-pgt 0xFFFFEA0000000000
+        0XFFFFEA0000000000 => 0XEA0000000000
+        PGDIR = 0X1D4 = 468
+        PUD   = 0 = 0
+        PMD   = 0 = 0
+        PT    = 0 = 0
+
+    首先需要分配出一个page做pud,然后把pud设到pgd[468]里去(vmemmap_pgd_populate),还需要分配一个page做pmd,然后把pmd设到pud[0]里,
+    再然后把pmd[0]指向上边分配好的2M内存.
+
+    这一部分代码有2点比较容易弄不明白:
+        第1点就是 sparse_mem_maps_populate_node 的最后,
+        if (vmemmap_buf_start) free_bootmem(vmemmap_buf, vmemmap_buf_end - vmemmap_buf);
+        我们在开头分配了2M的内存,但怎么又free了呢? 关键点在于vmemmap_buf是个全局变量,在上边做map做到pmd的时候,需要设pmd[0],
+        这时 vmemmap_buf = vmemmap_buf + PMD_SIZE, 所以此时 vmemmap_buf == vmemmap_buf_end, 也就是说 free_bootmem 是调用了,
+        但没有free掉任何内存
+
+        第2点是调用 vmemmap_populate 时, 传递的第2个参数是 PAGES_PER_SECTION = 0x8000, 而不是 sizeof(struct page) * PAGES_PER_SECTION
+        这里的关键点在于这个函数里边end的计算 end = (unsigned long)(start_page + size); start_page是指向 struct_page 的指针, 所以
+        start_page + size 其实就是 start_page[0x8000] = start_page + sizeof(start_page) * 0x8000
+*/
+    ./print_memblock
+        --reserved regions--
+            0: start=0x9a000, end=0x9f000, size=0x5000          // TRAMPOLINE
+            1: start=0x9fc00, end=0x100000, size=0x60400        // EBDA
+            2: start=0x1000000, end=0x1d04049, size=0xd04049    // Kernel TEXT DATA BSS and extend_brk 49 bytes
+            3: start=0x7200000, end=0x7400000, size=0x200000    // **map_map[0] 第1个section的map**
+            4: start=0x756e000, end=0x79eb000, size=0x47d000    // **map_map** and RAMDISK
+            5: start=0x7be6000, end=0x7fee000, size=0x408000    // **pud and pmd**
+                                                                // usemap_map and
+                                                                // THE PTE (0x1000) and
+                                                                // this node_data[0] pglist_data (0x5000)
+            6: start=0x7feefc0, end=0x7feefd8, size=0x18        // usemap_map[0] 第1个section的usemap
+            7: start=0x7fef000, end=0x7ff0000, size=0x1000      // mem_section[0]
+
+/*
+    第3部分再一次遍历64TB内存的所有section,把第1部分和第2部分得到的usemap和map分别设到mem_section里
+        mem_section.section_mem_map = map | SECTION_HAS_MEM_MAP | PRESENT
+        mem_section.pageblock_flags = usemap
+    前边我们知道 mem_section[0] = 0x7fef000, 用bochs查看一下:
+*/
+    mem_section[0] = {
+        unsigned long section_mem_map  = 0xffea 0000 0000 0003;
+        unsigned long *pageblock_flags = 0xffff 8800 07fe efc0;
+    };
+
+    vmemmap_populate_print_last(); // 在syslog里打印出来第2部分map的0xffea...的地址范围和对应的在0xffff88...里对应的地址
+/*
+    第4部分把第1部分和第2部分分配的两个4M的指针数组给free掉
+*/
+    ./print_memblock
+        --reserved regions里--
+        0: start=0x9a000, end=0x9f000, size=0x5000          // TRAMPOLINE
+        1: start=0x9fc00, end=0x100000, size=0x60400        // EBDA
+        2: start=0x1000000, end=0x1d04049, size=0xd04049    // Kernel TEXT DATA BSS and extend_brk 49 bytes
+        3: start=0x7200000, end=0x7400000, size=0x200000    // map_map[0] 第1个section的map
+        4: start=0x796e000, end=0x79eb000, size=0x7d000     // RAMDISK
+        5: start=0x7be6000, end=0x7be8000, size=0x2000      // 0xffea...的pud和pmd
+        6: start=0x7fe8000, end=0x7fee000, size=0x6000      // THE PTE (0x1000) and node_data[0] pglist_data (0x5000)
+        7: start=0x7feefc0, end=0x7feefd8, size=0x18        // usemap_map[0] 第1个section的usemap
+        8: start=0x7fef000, end=0x7ff0000, size=0x1000      // mem_section[0]
+    </code></pre>
+
+    我们更新下pagetable
+    <div id="pagetable-3" class="mar-btm pagetable"></div>
+<script>
+var init_level4_pgt = 0x81a03000,
+    level3_ident_pgt = 0x81a04000,
+    level3_kernel_pgt = 0x81a05000,
+    level2_fixmap_pgt = 0x81a06000,
+    level1_fixmap_pgt = 0x81a07000,
+    level2_ident_pgt = 0x81a08000,
+    level2_kernel_pgt = 0x81a09000,
+    level2_spare_pgt = 0x81a0a000,
+    __START_KERNEL_map = 0x80000000,
+    _KERNPG_TABLE = 0x63,
+    _PAGE_TABLE = 0x67;
+function buildLevel2(addr, perm, count, start) {
+    var entries = {};
+    for (i = start; i < count; i++) {
+        entries[i] = addr + i * 0x200000 + perm
+    }
+
+    return entries;
+}
+function buildLevel1(addr, perm, count, start) {
+    var entries = {};
+    for (i = start; i < count; i++) {
+        entries[i] = addr + i * 0x1000 + perm
+    }
+
+    return entries;
+}
+$('#pagetable-3').pagetable([
+    {
+        name: 'init_level4_pgt',
+        addr: init_level4_pgt,
+        entries: {
+            0: 'NULL pointer',
+            272: level3_ident_pgt - __START_KERNEL_map + _KERNPG_TABLE,
+            468: 0x7be7000 + _PAGE_TABLE,
+            511: level3_kernel_pgt - __START_KERNEL_map + _PAGE_TABLE
+        }
+    },
+    // kernel pgt
+    {
+        name: 'level3_kernel_pgt',
+        addr: level3_kernel_pgt,
+        entries: {
+            510: level2_kernel_pgt - __START_KERNEL_map + _KERNPG_TABLE,
+            511: level2_fixmap_pgt - __START_KERNEL_map + _PAGE_TABLE
+        }
+    },
+    {
+        name: 'level2_kernel_pgt',
+        addr: level2_kernel_pgt,
+        entries: buildLevel2(0, 0x1e3, 30/2, 16/2)
+    },
+    // direct mappings
+    {
+        name: 'level3_ident_pgt',
+        addr: level3_ident_pgt,
+        entries: {
+            0: level2_ident_pgt - __START_KERNEL_map + _KERNPG_TABLE
+        }
+    },
+    {
+        name: 'level2_ident_pgt',
+        addr: level2_ident_pgt,
+        entries: (function () {
+            var entries = buildLevel2(0, 0x1e3, 126/2, 0);
+            entries[63] = 0x7fed000 + _KERNPG_TABLE;
+            return entries;
+        })()
+    },
+    {
+        name: 'level1 ident pgt (pte) 4K',
+        addr: 0x7fed000,
+        entries: buildLevel1(0x7e00000, 0x163, 0x7ff0 - 0x7e00, 0)
+    },
+    // section_mem_map
+    {
+        name: 'section_mem_map pud(0xffea 0000 0000 0000)',
+        addr: 0x7be7000,
+        entries: {
+            0: 0x7be6000 + _PAGE_TABLE
+        }
+    },
+    {
+        name: 'section_mem_map pmd(0xffea 0000 0000 0000)',
+        addr: 0x7be6000,
+        entries: {
+            0: 0x7200000 + 0x1e3
+        }
+    }
+]);
+</script>
+    <code>free_area_init_nodes(max_zone_pfns);</code>
+    <pre><code class="language-c">enum zone_type {
+	ZONE_DMA,       // 0
+	ZONE_DMA32,     // 1
+	ZONE_NORMAL,    // 2
+	ZONE_MOVABLE,   // 3
+	__MAX_NR_ZONES  // 4 __MAX_NR_ZONES就是MAX_NR_ZONES, @see kernel/bounds.c
+};
+
+unsigned long max_zone_pfns[4] = {
+    ZONE_DMA    => 0x1000,
+    ZONE_DMA32  => 0x100000,
+    ZONE_NORMAL => max_pfn = 0x7ff0
+};
+
+/* early_node_map 0x1aae220
+    start_pfn       end_pfn     nid
+    0x10            0x9f        0
+    0x100           0x7ff0      0
+*/
+unsigned long arch_zone_lowest_possible_pfn[4]  = {
+    ZONE_DMA     => 0x10,
+    ZONE_DMA32   => 0x1000,
+    ZONE_NORMAL  => 0x100000,
+    ZONE_MOVABLE => 0
+};
+unsigned long arch_zone_highest_possible_pfn[4] = {
+    ZONE_DMA     => 0x1000,
+    ZONE_DMA32   => 0x100000,
+    ZONE_NORMAL  => 0x100000,
+    ZONE_MOVABLE => 0
+};
+
+// 不清楚 ZONE_MOVABLE 是做什么用的,跳过 find_zone_movable_pfns_for_nodes(zone_movable_pfn);
+
+Zone PFN ranges:
+    DMA     0x10    -> 0x1000   // 64K - 16M
+    DMA32   0x1000  -> 0x100000 // 16M - 4G
+    NORMAL  empty
+Movable zone start PFN for each node
+    // zone_movable_pfn 是空的
+early_node_map[2] active PFN ranges
+    0: 0x10 -> 0x9f
+    1: 0x100 -> 0x7ff0
+
+mminit_verify_pageflags_layout();
+// struct page有一个属性 unsigned long flags (64bit), 在这64bit里会嵌入 section, node, zone, pageflags 等信息
+// @see include/linux/mm.h#0580
+SECTIONS_WIDTH = 0  // CONFIG_SPARSEMEM=y && CONFIG_SPARSEMEM_VMEMMAP=y
+NODES_WIDTH    = 6  (MAX_NUMNODES = 64)
+ZONE_WIDTH     = 2  (MAX_NR_ZONES = 4)
+NR_PAGEFLAGS   =    // @see include/linux/page-flags.h#0110
+// 所以page.flags的layout是 | NODE(6bit) | ZONE(2bit) | ... | FLAGS |
+
+free_area_init_node(0, NULL, 0x10, NULL);
+    node_data[0].node_id        = 0;
+    node_data[0].node_start_pfn = 0x10;
+
+    // zone_spanned_pages_in_node() 结合 early_node_map, arch_zone_lowest_possible_pfn, arch_zone_highest_possible_pfn 计算出
+    totalpages = (0x1000 - 0x10)        // ZONE_DMA
+                 + (0x7ff0 - 0x1000)    // ZONE_DMA32
+                 + 0                    // ZONE_NORMAL
+                 + 0                    // ZONE_MOVABLE
+               = 0x7fe0
+    node_data[0].node_spanned_pages = 0x7fe0
+    // zone_absent_pages_in_node() 结合 early_node_map, arch_zone_lowest_possible_pfn, arch_zone_highest_possible_pfn 计算出
+    totalpages - (0x100 - 0x9f) // ZONE_DMA
+               - 0              // ZONE_DMA32
+               - 0              // ZONE_NORMAL
+               - 0              // ZONE_MOVABLE
+    node_data[0].node_present_pages = 0x7f7f
+
+    On node 0 totalpages: 0x7f7f
+    // 前边 initmem_init 时,根据 numa_meminfo 简单的设了 node_start_pfn = 0, node_spanned_pages = 0x7ff0, 这里修正过来了
+
+    alloc_node_mem_map(pgdat); // 这个函数只有定义了 CONFIG_FLAT_NODE_MEM_MAP 时才会产生实际指令,所以下边就直接进入了 free_area_init_core();
+
+    /*
+     * Set up the zone data structures:
+     *   - mark all pages reserved
+     *   - mark all memory queues empty
+     *   - clear the memory bitmaps
+     */
+    free_area_init_core(pgdat, NULL, NULL);
+        pgdat_resize_init(pgdat); // => spin_lock_init(&pgdat->node_size_lock);
+        pgdat->nr_zones = 0;
+        init_waitqueue_head(&pgdat->kswapd_wait); // spin_lock_init(kswapd_wait.lock), INIT_LIST_HEAD(kswapd_wait.task_list)
+        pgdat->kswapd_max_order = 0;
+        pgdat_page_cgroup_init(pgdat); // 不产生任何实际指令
+
+        ZONE_DMA:
+            size     = zone_spanned_pages_in_node() = 0x1000 - 0x10 = 0xff0
+            realsize = size - zone_absent_pages_in_node() = 0xff0 - (0x100-0x9f) = 0xf8f
+            memmap_pages = PAGE_ALIGN(0xff0*56) &gt;&gt; 12 = 0x38
+            realsize -= memmap_pages  = 0xf8f - 0x38 = 0xf57
+            // syslog: DMA zone: 0x38 pages used for memmap
+            realsize -= dma_reserve = 0xf57 - 0x5 = 0xf52
+            // syslog: DMA zone: 0x5 pages reserved
+            nr_kernel_pages += 0xf52 = 0xf52
+            nr_all_pages += 0xf52
+
+            zone.spanned_pages = 0xff0
+            zone.present_pages = 0xf52
+            zone.node = 0
+            zone.min_unmapped_pages = (realsize*sysctl_min_unmapped_ratio) / 100 = realsize * 1% = 0x27
+            zone.min_slab_pages     = (realsize * sysctl_min_slab_ratio)   / 100 = realsize * 5% = 0xc4
+            zone.name = "ZONE_DMA";
+
+            zone_pcp_init(zone);
+                zone->pageset = &boot_pageset;
+            // ...
+            if (!size)
+                continue;
+
+            set_pageblock_order(pageblock_default_order()); // 不产生任何实际指令
+            setup_usemap(pgdat, zone, size); // 不产生任何实际指令
+
+            init_currently_empty_zone(zone, zone_start_pfn=0x10, size=0xff0, MEMMAP_EARLY);
+                zone_wait_table_init();
+                    // wait_table_hash_nr_entries() 的注释里写的不对, sizeof(wait_queue_head_t) 即使是 no preemption 的情况下也是 24
+                    zone->wait_table_hash_nr_entries = 4096;
+                    zone->wait_table = alloc_bootmem_node_nopanic(pgdat, 4096 * 24 = 0x18000);
+                node_data[0].nr_zones = 1;
+                zone.zone_start_pfn = 0x10;
+                zone_init_free_lists(zone);
+                    zone.free_area[0...10].nr_free = 0
+                                          .free_list = {0: , 1: , 2: , 3: , 4: }
+            memmap_init(size=0xff0,nid=0,0,zone_start_pfn=0x10);
+                set_page_links(page, zone, nid, pfn); // 前边每个section都有一个mem_map,mem_map就是个struct page数组,
+                                                      // 这里遍历一个zone的pfn,把对应的page设上zone,node,section
+                                                      // 这样,你随便指一个page(pdf),就立马能知道这个page属于哪个zone,node,section
+                        set_page_zone(page, zone);
+                        set_page_node(page, node);
+                        set_page_section(page, pfn_to_section_nr(pfn));
+                page->_count = 1
+                page->_mapcount = -1
+/*
+之前做的笔记:
+MIGRATE_TYPES 目前有5个, 要保存下0-4这5个值,需要3个bit.
+128M有64个2M,每个2M都可以在pagetable里占一条,所以usemap也叫pageblock
+64 * 3 / 8 = 24
+这就是为什么usemap的大小是24的原因了.
+在memmap_init_zone里,啥都不管,直接把每2M都设成MIGRATE_MOVABLE=2了
+0 - 2M - 4M - 6M - 8M - 10M
+ 010   010  010  010  010 => 总共64个010, 最终usemap看起来就是492 492的重复
+*/
+</code></pre>
+</div>
+
+<p class="bg-info pad-all">
+总结下 paging_init() 做的事:<br>
+原来我们通过 e820 和 memblock 来管理内存, initmem_init() 简单的初始化了 node_data <br>
+paging_init() 进一步的初始化 node_data, 把它分为 DMA/DMA32/NORMAL/MOVABLE 这4个Zone, node自身有多少page, zone自身又有多少page都清楚了<br>
+另外, paging_init() 还引入了内存管理的另一个角度,SECTION.<br>
+section把内存分成128M一块,每一块都有对应的mem_map和usemap来描述内存的状况. usemap目前还不清楚是做什么的, mem_map就是个struct page数组, sparse_init() 时, 分配并map了mem_map,在zone初始化时,把mem_map里的page给设上了对应的属性,现在随便一个page我们都知道它是哪个node,哪个zone的了.
+</p>
+
+<pre>
+./print_memblock
+--reserved regions--
+0: start=0x9a000, end=0x9f000, size=0x5000          // TRAMPOLINE
+1: start=0x9fc00, end=0x100000, size=0x60400        // EBDA
+2: start=0x1000000, end=0x1d04049, size=0xd04049    // Kernel TEXT DATA BSS and extend_brk 49 bytes
+3: start=0x7200000, end=0x7400000, size=0x200000    // map_map[0] 第1个section的map
+4: start=0x796e000, end=0x79eb000, size=0x7d000     // RAMDISK
+5: start=0x7be6000, end=0x7be8000, size=0x2000      // 0xffea...的pud和pmd
+6: start=0x7fb8000, end=0x7fee000, size=0x36000     // ZONE_DMA32 wait_table (0x7fb8000 0x18000)
+                                                    // ZONE_DMA wait_table (0x7fd0000 0x18000)
+                                                    // node_data[0] pglist_data (0x7fe8000 0x5000)
+                                                    // THE PTE (0x7fed000 0x1000)
+7: start=0x7feefc0, end=0x7feefd8, size=0x18
+8: start=0x7fef000, end=0x7ff0000, size=0x1000
+
+// bochs: writemem "/tmp/node_data.memdump" 0xffff880007fe8000 0x5000
+./print_node_data /tmp/node_data.memdump
+
+// bochs: writemem "/tmp/section_mem_map.memdump" 0xffff880007200000 0x200000
+./print_section_mem_map /tmp/section_mem_map.memdump
+</pre>
+<br>
+
+很多地方都要用boot_cpu_data,我们写个程序把它打印出来.<br>
+<pre class="bg-info">
+boot_cpu_data 0x1ac4900
+</pre>
+<pre>
+// bochs: writemem "/tmp/boot_cpu_data.memdump" 0xffffffff81ac4900 0xc0
+./print_boot_cpu_data /tmp/boot_cpu_data.memdump
+sizeof boot_cpu_data = sizeof(struct cpuinfo_x86) = 0xc0
+x86             = 0x6
+x86_vendor      = 0 (Intel)
+....
+cpuid_level     = 0x5
+....
+</pre>
+<pre><code class="language-c">if (boot_cpu_data.cpuid_level >= 0) {
+	/* A CPU has %cr4 if and only if it has CPUID */
+	mmu_cr4_features = read_cr4();
+}</code></pre>
+在bochs里可以很容易看到 %cr4 = 0xb0 = 10110000b, 参照 AMD-Volume2 Page 47 对CR4 Register的介绍,我们知道当前CR4的情况是 PSE | PAE | PGE.<br>
+<blockquote>
+The PSE bit has no effect when physical-address extensions are enabled (CR4.PAE=1). Because long
+mode requires CR4.PAE=1, the PSE bit is ignored when the processor is running in long mode.<br><br>
+With PAE=1, the page-translation data structures are expanded from 32 bits to 64 bits, allowing the
+translation of up to 52-bit physical addresses. Also, the physical-page size is selectable between
+4 Kbytes and 2 Mbytes using the page-directory-entry page-size field (PS). Long mode requires PAE
+to be enabled in order to use the 64-bit page-translation data structures to translate 64-bit virtual
+addresses to 52-bit physical addresses.<br><br>
+When page translation is enabled, system-software performance
+can often be improved by making some page translations global to all tasks and procedures. Setting
+PGE to 1 enables the global-page mechanism. Clearing this bit to 0 disables the mechanism.<br>
+When PGE is enabled, system software can set the global-page (G) bit in the lowest level of the page-
+translation hierarchy to 1, indicating that the page translation is global. Page translations marked as
+global are not invalidated in the TLB when the page-translation-table base address (CR3) is updated.
+When the G bit is cleared, the page translation is not global.
+</blockquote>
+<br>
+
+<code>tboot_probe();</code> .config里没有定义 CONFIG_INTEL_TXT,所以这是个空函数.<br><br>
+
+<code>map_vsyscall();</code>
+<pre><code class="language-c">
+// 前边 early_ioremap_init() 时, 我们已经知道 VSYSCALL_FIRST_PAGE = 2047, 进而它的vaddr = 0xffffffffff600000
+./calc-pgt 0xffffffffff600000
+0XFFFFFFFFFF600000 => 0XFFFFFF600000
+PGDIR = 0X1FF = 511 // init_level4_pgt[511] 指向 level3_kernel_pgt (0x1a05000)
+PUD   = 0X1FF = 511 // level3_kernel_pgt[511] 指向 level2_fixmap_pgt (0x1a06000)
+                    // early_ioremap_init()时我们已经知道, level2_fixmap_pgt[506] 指向 bm_pte
+                    // early_acpi_boot_init()时, bm_pte[508] 指向了 0x80000000FEE0017B (CPU local APIC's registers)
+PMD   = 0X1FB = 507 // level2_fixmap_pgt[507]是空的
+                    // 所以需要分配一个pagetable(file_pte -> spp_getpage => 0x7fb7000)并在memblock里reserve
+                    // 然后 level2_fixmap_pgt[507] 指向这个新的 pte (0x7fb7000)
+PT    = 0 = 0       // 最后 pte[0] 指向 __vsyscall_0, __vsyscall_0 定义在 arch/x86/kernel/vmlinux.lds.S#0166
+</code></pre>
+map_vsyscall()做的事就是把kernel里 __vsyscall_0 开始的那一块内存 map 到虚拟地址 0xffffffffff600000 上. 也就是:<br>
+init_level4_pgt[511] -> level3_kernel_pgt[511] -> level2_fixmap_pgt[507] -> NEW PTE (0x7fb7000)
+<pre>
+./print_memblock
+--reserved regions--
+0: start=0x9a000, end=0x9f000, size=0x5000          // TRAMPOLINE
+1: start=0x9fc00, end=0x100000, size=0x60400        // EBDA
+2: start=0x1000000, end=0x1d04049, size=0xd04049    // Kernel TEXT DATA BSS and extend_brk 49 bytes
+3: start=0x7200000, end=0x7400000, size=0x200000    // map_map[0] 第1个section的map
+4: start=0x796e000, end=0x79eb000, size=0x7d000     // RAMDISK
+5: start=0x7be6000, end=0x7be8000, size=0x2000      // 0xffea...的pud和pmd
+6: start=0x7fb7000, end=0x7fee000, size=0x37000     // **level2_fixmap_pgt[507] -> NEW PTE (0x7fb7000 0x1000) map __vsyscall_0**
+                                                    // ZONE_DMA32 wait_table (0x7fb8000 0x18000)
+                                                    // ZONE_DMA wait_table (0x7fd0000 0x18000)
+                                                    // node_data[0] pglist_data (0x7fe8000 0x5000)
+                                                    // THE PTE (0x7fed000 0x1000)
+7: start=0x7feefc0, end=0x7feefd8, size=0x18
+8: start=0x7fef000, end=0x7ff0000, size=0x1000
+</pre>
+    再更新下pagetable
+    <div id="pagetable-4" class="mar-btm pagetable"></div>
+<script>
+var init_level4_pgt = 0x81a03000,
+    level3_ident_pgt = 0x81a04000,
+    level3_kernel_pgt = 0x81a05000,
+    level2_fixmap_pgt = 0x81a06000,
+    level1_fixmap_pgt = 0x81a07000,
+    level2_ident_pgt = 0x81a08000,
+    level2_kernel_pgt = 0x81a09000,
+    level2_spare_pgt = 0x81a0a000,
+    __START_KERNEL_map = 0x80000000,
+    _KERNPG_TABLE = 0x63,
+    _PAGE_TABLE = 0x67;
+function buildLevel2(addr, perm, count, start) {
+    var entries = {};
+    for (i = start; i < count; i++) {
+        entries[i] = addr + i * 0x200000 + perm
+    }
+
+    return entries;
+}
+function buildLevel1(addr, perm, count, start) {
+    var entries = {};
+    for (i = start; i < count; i++) {
+        entries[i] = addr + i * 0x1000 + perm
+    }
+
+    return entries;
+}
+$('#pagetable-4').pagetable([
+    {
+        name: 'init_level4_pgt',
+        addr: init_level4_pgt,
+        entries: {
+            0: 'NULL pointer',
+            272: level3_ident_pgt - __START_KERNEL_map + _KERNPG_TABLE,
+            468: 0x7be7000 + _PAGE_TABLE,
+            511: level3_kernel_pgt - __START_KERNEL_map + _PAGE_TABLE
+        }
+    },
+    // kernel pgt
+    {
+        name: 'level3_kernel_pgt',
+        addr: level3_kernel_pgt,
+        entries: {
+            510: level2_kernel_pgt - __START_KERNEL_map + _KERNPG_TABLE,
+            511: level2_fixmap_pgt - __START_KERNEL_map + _PAGE_TABLE
+        }
+    },
+    {
+        name: 'level2_kernel_pgt',
+        addr: level2_kernel_pgt,
+        entries: buildLevel2(0, 0x1e3, 30/2, 16/2)
+    },
+    // direct mappings
+    {
+        name: 'level3_ident_pgt',
+        addr: level3_ident_pgt,
+        entries: {
+            0: level2_ident_pgt - __START_KERNEL_map + _KERNPG_TABLE
+        }
+    },
+    {
+        name: 'level2_ident_pgt',
+        addr: level2_ident_pgt,
+        entries: (function () {
+            var entries = buildLevel2(0, 0x1e3, 126/2, 0);
+            entries[63] = 0x7fed000 + _KERNPG_TABLE;
+            return entries;
+        })()
+    },
+    {
+        name: 'level1 ident pgt (pte) 4K',
+        addr: 0x7fed000,
+        entries: buildLevel1(0x7e00000, 0x163, 0x7ff0 - 0x7e00, 0)
+    },
+    // section_mem_map
+    {
+        name: 'section_mem_map pud(0xffea 0000 0000 0000)',
+        addr: 0x7be7000,
+        entries: {
+            0: 0x7be6000 + _PAGE_TABLE
+        }
+    },
+    {
+        name: 'section_mem_map pmd(0xffea 0000 0000 0000)',
+        addr: 0x7be6000,
+        entries: {
+            0: 0x7200000 + 0x1e3
+        }
+    },
+    // level2_fixmap_pgt
+    {
+        name: 'level2_fixmap_pgt',
+        addr: level2_fixmap_pgt,
+        entries: {
+            506: 0x1bb2000 + _PAGE_TABLE,
+            507: 0x7fb7000 + _PAGE_TABLE
+        }
+    },
+    // bm_pte
+    {
+        name: 'bm_pte',
+        addr: 0x1bb2000,
+        entries: {
+            508: 0x80000000FEE0017B
+        }
+    },
+    // __vsyscall_0 pte
+    {
+        name: '__vsyscall_0 pte',
+        addr: 0x7fb7000,
+        entries: {
+            0: 0x1acd000 + 0x165
+        }
+    }
+]);
+</script>
+
+<code>generic_apic_probe();</code> 空函数,不产生任何实际指令.<br><br>
+
+<code>early_quirks();</code> early_pci_allowed() 遇到过好几次了,这个函数返回1,也就是说 early_pci 是 allowed 的.<br>
+虽然不是非常明白PCI是怎么回事,但看起来像是这么回事: (@see http://wiki.osdev.org/PCI first)<br>
+电脑上的设备通过多个bus连接到cpu,其中有一个bus是root bus. root bus上最多可以连接32个设备(slot),每个设备最多提供8个func可调用.<br>
+向 0xCF8 写入32bit值说明要调用哪个bus上的哪个设备的哪个func,然后从 0xCFC 读取返回数据, 如果返回的数据里 Vendor ID == 0xFFFF, 说明这个slot上没有连接设备.<br>
+early_quirks();做的事就是过一遍这些设备,kernel自己有一个已知有问题的设备清单,如果检查到清单里的设备,就要调用相应的函数来fix这个设备的bug.<br>
+跟踪bochs的执行会发现,bochs虚拟的设备不在这个清单里,所以这个函数什么也没做.<br><br>
+
+<code>acpi_boot_init();</code>
+<pre><code class="language-c">
+dmi_check_system(acpi_dmi_table_late);
+// 前边 dmi_scan_machine() 时取得了BIOS的信息, 然后在 acpi_boot_table_init() 时调用过这个 dmi_check_system(acpi_dmi_table)
+// acpi_dmi_table 是一个黑名单, 如果在黑名单里的话 acpi_disabled = 1, 这里的 acpi_dmi_table_late 显然是另一个黑名单, 在这个单子里的
+// timer都有问题, 这个单子都是HP laptop, 显然和我们没啥关系, 跳过去就是了
+
+acpi_table_parse(ACPI_SIG_BOOT, acpi_parse_sbf);
+// 这个函数调用我们在前边已经分析过了,我们没有BOOT table,所以它什么也没做
+
+acpi_table_parse(ACPI_SIG_FADT, acpi_parse_fadt);
+// FADT (Fixed ACPI Description Table) is a data structure used in the ACPI programming interface.
+// This table contains information about fixed register blocks pertaining to power management.
+// .config里定义了 CONFIG_X86_PM_TIMER=y, 所以 acpi_parse_fadt() 是有实际代码运行的. 前边我们打印过 acpi_gbl_FADT, revision = 1, 所以
+    pmtmr_ioport = acpi_gbl_FADT.pm_timer_block;
+    // 我们需要写个小程序把 acpi_gbl_FADT 给打印出来
+    // bochs writemem "/tmp/acpi_gbl_FADT.memdump" 0xffffffff81ceea80 288
+    ./print_acpi_table_fadt /tmp/acpi_gbl_FADT.memdump
+    pm_timer_block = 0xb008
+    然后在 syslog 里打印: ACPI: PM-Timer IO Port: 0xb008
+
+acpi_process_madt();
+// MADT Multiple APIC Description Table
+// The MADT describes all of the interrupt controllers in the system. It can be used to enumerate the processors currently available.
+// UnderStandingKernel里介绍了普通的PIC和IO APIC. 
+// This chip (IO APIC) is the advanced version of the old 8259A Programmable Interrupt Controller; to support old operating systems, recent motherboards include both types of chip.
+    acpi_table_parse(ACPI_SIG_MADT, acpi_parse_madt);
+    // early_acpi_process_madt(); 时我们已经运行过这个函数, 它返回0
+        acpi_parse_madt_lapic_entries();
+        // 前边我们分析过 madt 的 subtable, 有三个, type分别为:
+        // 0 - ACPI_MADT_TYPE_LOCAL_APIC
+        // 1 - ACPI_MADT_TYPE_IO_APIC
+        // 2 - ACPI_MADT_TYPE_INTERRUPT_OVERRIDE
+            => acpi_parse_lapic()
+                struct acpi_madt_local_apic = {
+                    header: u8 type = 0, u8 length = 8,
+                    u8 processor_id = 0 /* ACPI processor id */
+                    u8 id = 0 /* Processor's local APIC id */
+                    u32 lapic_flags = 0x00000001
+                };
+                syslog打印出 LAPIC (acpi_id[0x00] lapic_id[0x00] enabled)
+                acpi_register_lapic(processor->id, processor->lapic_flags & ACPI_MADT_ENABLED)
+                // 看来 kernel 是根据 LOCAL_APIC 来确定 cpu 数量的
+        // 最终 acpi_parse_madt_lapic_entries() 返回0
+            acpi_lapic = 1
+                acpi_parse_madt_ioapic_entries();
+                    => acpi_parse_ioapic()
+                        struct acpi_madt_io_apic {
+                            header: u8 type = 1, u8 length = 0xc
+                            u8 id = 1 /* I/O APIC ID */
+                            u8 reserved = 0 /* Reserved - must be zero */
+                            u32 address = 0xfec00000 /* APIC physical address */
+                            u32 global_irq_base = 0 /* Global system interrupt where INTI lines start */
+                        }
+                        syslog打印出 IOAPIC (id[0x01] address[0xfec00000] gsi_base[0])
+                        mp_register_ioapic(ioapic->id = 1, ioapic->address = 0xfec00000, ioapic->global_irq_base = 0)
+                            mp_ioapics[0].type  = MP_IOAPIC = 2;
+                            mp_ioapics[0].flags = MPC_APIC_USABLE = 1;
+                            mp_ioapics[0].apicaddr = address = 0xfec00000;
+                            set_fixmap_nocache(FIX_IO_APIC_BASE_0 + idx, address); // 0xfec00000要在bm_pte里做map
+                            mp_ioapics[0].apicid = io_apic_unique_id(id) = 1;
+                            mp_ioapics[0].apicver = io_apic_get_version(idx) = 0x11;
+                            // mp_ioapics 0x1be2d00
+                            entries = io_apic_get_redir_entries(idx) = 24;
+                            mp_gsi_routing[0].gsi_base = gsi_base = 0;
+                            mp_gsi_routing[0].gsi_end  = gsi_base + entries - 1 = 0x17;
+                            mp_gsi_routing 0x1be28e0
+                            nr_ioapic_registers[idx] = entries = 24;
+                            syslog打印出 IOAPIC[0]: apic_id 1, version 0x11, address 0xfec00000, GSI 0-0x17
+                            // 看了Intel的IO-APIC文档我们知道,IO-APIC有27个register,访问这些register是通过向apicaddr(IOREGSEL)写入register的index
+                            // 然后读取apicaddr+0x10(IOWIN)得到想要的数据,或写入更改对应register的内容
+                            // 上边把apicaddr(0xfec00000)做好map后,要取得APIC hardware version,使用writel向0xfec00000写入1,然后读取0xfec00010
+                            // 它的低8位(0-7bit)就是APIC VERSION
+                            // 接下来要获取redirection table entry的数量,同样是写入1,再读取,返回值的16:23bit就是rediection table entry的数量.
+/* @see UnderStandingKernel
+    The I/O APIC consists of a set of 24 IRQ lines, a 24-entry Interrupt Redirection
+    Table, programmable registers, and a message unit for sending and receiving APIC
+    messages over the APIC bus. Unlike IRQ pins of the 8259A, interrupt priority is not
+    related to pin number: each entry in the Redirection Table can be individually pro-
+    grammed to indicate the interrupt vector and priority, the destination processor, and
+    how the processor is selected. The information in the Redirection Table is used to
+    translate each external IRQ signal into a message to one or more local APIC units via
+    the APIC bus.
+
+@see Intel 82093AA I/O ADVANCED PROGRAMMABLE INTERRUPT CONTROLLER (IOAPIC)
+    At the system level, APIC consists of two parts—one residing in the I/O subsystem (called the IOAPIC) and
+    the other in the CPU (called the Local APIC). The local APIC and the IOAPIC communicate over a dedicated APIC bus.
+
+    The CPU's Local APIC Unit contains the necessary intelligence to determine whether or not its processor should
+    accept interrupts broadcast on the APIC bus. The Local Unit also provides local pending of interrupts, nesting
+    and masking of interrupts, and handles all interactions with its local processor (e.g., the INTR/INTA/EOI
+    protocol). The Local Unit further provides inter-processor interrupts and a timer, to its local processor.
+
+    The IOAPIC Unit consists of a set of interrupt input signals, a 24-entry by 64-bit Interrupt Redirection Table,
+    programmable registers, and a message unit for sending and receiving APIC messages over the APIC bus. I/O
+    devices inject interrupts into the system by asserting one of the interrupt lines to the IOAPIC. The IOAPIC
+    selects the corresponding entry in the Redirection Table and uses the information in that entry to format an
+    interrupt request message.Each entry in the Redirection Table can be individually programmed to indicate
+    edge/level sensitive interrupt signals, the interrupt vector and priority, the destination processor, and how the
+    processor is selected (statically or dynamically). The information in the table is used to transmit a message to
+    other APIC units (via the APIC bus).
+
+    The IOAPIC contains a set of programmable registers. Two of the registers (I/O Register Select and I/O Window
+    Registers) are located in the CPU's memory space and are used to indirectly access the other APIC registers.
+    The Version Register provides the implementation version of the
+    IOAPIC. The IOAPIC ID Register is programmed with an ID value that serves as a physical name of the IOAPIC.
+    This ID is loaded into the ARB ID Register when the IOAPIC ID Register is written and is used during bus
+    arbitration.
+*/
+                    => acpi_parse_int_src_ovr()
+                        struct acpi_madt_interrupt_override {
+                            header: u8 type = 2, u8 length = 0xa
+                            u8 bus = 0
+                            u8 source_irq = 0
+                            u32 global_irq = 0x00000002
+                            u16 inti_flags = 0
+                        }
+                        syslog打印出 INT_SRC_OVR (bus 0 bus_irq 0 global_irq 2 dfl fdl)
+                        mp_override_legacy_irq()
+                    => acpi_sci_ioapic_setup()
+                    => mp_config_acpi_legacy_irqs()
+                    acpi_set_irq_model_ioapic();
+                        acpi_irq_model = ACPI_IRQ_MODEL_IOAPIC;
+                        __acpi_register_gsi = acpi_register_gsi_ioapic;
+                        acpi_ioapic = 1;
+                    smp_found_config = 1;
+    最后我们得到 acpi_lapic = 1 && acpi_ioapic = 1, 然后在 syslog 里打印 Using ACPI (MADT) for SMP configuration information
+    // acpi_table_parse(ACPI_SIG_HPET, acpi_parse_hpet);
+    // 我们知道没有 HPET table, 所以这个函数啥都没做
+    x86_init.pci.init = pci_acpi_init;
+</code></pre>
+<br>
+
+<code>sfi_init();</code> 由于 acpi_disabled = 0, 所以 disable_sfi(); 然后这个函数就返回了,什么也没做.<br><br>
+
+<code>x86_dtb_init();</code> .config 里没有定义 CONFIG_OF, 所以这个函数是个空函数, 不产生任何实际指令. <br><br>
+
+<code>get_smp_config();</code> => default_get_smp_config(0); acpi_boot_init()的时候我们知道 acpi_lapic = 1 && acpi_ioapic = 1, 所以这个函数也早早的返回了, 啥也没做.<br><br>
+
+<code>prefill_possible_map();</code> 我们在 acpi_boot_init() 的 acpi_parse_lapic() 时 count 了 num_processors (0x1be07c4), 现在的值是 1. <br>
+setup_max_cpus = 256, setup_possible_cpus = -1, total_cpus = 1.<br>
+syslog打印出 SMP: Allowing 1 CPUs, 0 hotplug CPUs.<br>
+set_cpu_possible(0, true); set_cpu_possible(1...256, false);<br>
+nr_cpu_ids = 1<br><br>
+
+<code>init_cpu_to_node();</code> 其实就是把cpu和node关联起来,我们是 dummy 的 node, 所以不管多少个cpu,都只有一个node.<br>
+x86_cpu_to_node_map 其实就是 int x86_cpu_to_node_map_early_map[256], 我们只有一个node,所以这个数组始终都是全0.<br>
+x86_cpu_to_node_map_early_map 0x1b374a0<br><br>
+
+<code>init_apic_mappings();</code> apic_phys = mp_lapic_addr = 0xfee00000 <br><br>
+<code>ioapic_and_gsi_init();</code>
+<pre><code class="language-c">// 分配一块内存,用于ioapic_resources, 内存大小 = (IOAPIC_RESOURCE_NAME_SIZE + sizeof(struct resource)) * nr_ioapics = (11 + 56) * 1 = 67(0x43).
+
+ioapic_res->start = ioapic_phys;
+ioapic_res->end = ioapic_phys + IO_APIC_SLOT_SIZE - 1; // 前边我们知道IO-APIC操作register只使用 IOREGSEL 和 IOWIN, 这里SLOT_SIZE=1024是几个意思?
+
+probe_nr_irqs_gsi();
+    gsi_top = 24;
+    nr_irqs_gsi = gsi_top + NR_IRQS_LEGACY = 24 + 16 = 40
+
+/* ./print_memblock
+--reserved regions--
+0: start=0x9a000, end=0x9f000, size=0x5000          // TRAMPOLINE
+1: start=0x9fc00, end=0x100000, size=0x60400        // EBDA
+2: start=0x1000000, end=0x1d04049, size=0xd04049    // Kernel TEXT DATA BSS and extend_brk 49 bytes
+3: start=0x7200000, end=0x7400000, size=0x200000    // map_map[0] 第1个section的map
+4: start=0x796e000, end=0x79eb000, size=0x7d000     // RAMDISK
+5: start=0x7be6000, end=0x7be8000, size=0x2000      // 0xffea...的pud和pmd
+6: start=0x7fb7000, end=0x7fee000, size=0x37000     // level2_fixmap_pgt[507] -> NEW PTE (0x7fb7000 0x1000) map __vsyscall_0
+                                                    // ZONE_DMA32 wait_table (0x7fb8000 0x18000)
+                                                    // ZONE_DMA wait_table (0x7fd0000 0x18000)
+                                                    // node_data[0] pglist_data (0x7fe8000 0x5000)
+                                                    // THE PTE (0x7fed000 0x1000)
+7: start=0x7feef40, end=0x7feef83, size=0x43        // **ioapic_resources**
+8: start=0x7feefc0, end=0x7feefd8, size=0x18        // 第1个section的usemap
+9: start=0x7fef000, end=0x7ff0000, size=0x1000      // mem_section[0]
+*/</code></pre>
+<br>
+
+<code>kvm_guest_init();</code> 前边我们已经知道 kvm_para_available() 返回0, 所以这个函数什么也没做.<br><br>
+
+<code>e820_reserve_resources();</code> 分配一块内存,用于 e820_res; 然后一个for循环,把e820_saved里的每个entry都生成一个firmware_map_entry,加到LIST　map_entries里<br>
+e820_res 内存大小 = sizeof(struct resource) * e820.nr_map = 56 * 7 = 0x188<br>
+map_entries　内存大小 = sizeof(struct firmware_map_entry) * e820_saved.nr_map = 0x68 * 6<br>
+<pre><code class="language-c">struct firmware_map_entry {
+    u64 start;
+    u64 end;
+    const char *type;
+    struct list_head list;
+    struct kobject kobj;
+};
+static LIST_HEAD(map_entries);
+
+./print_memblock
+--reserved regions--
+0: start=0x9a000, end=0x9f000, size=0x5000          // TRAMPOLINE
+1: start=0x9fc00, end=0x100000, size=0x60400        // EBDA
+2: start=0x1000000, end=0x1d04049, size=0xd04049    // Kernel TEXT DATA BSS and extend_brk 49 bytes
+3: start=0x7200000, end=0x7400000, size=0x200000    // map_map[0] 第1个section的map
+4: start=0x796e000, end=0x79eb000, size=0x7d000     // RAMDISK
+5: start=0x7be6000, end=0x7be8000, size=0x2000      // 0xffea...的pud和pmd
+6: start=0x7fb7000, end=0x7fee000, size=0x37000     // level2_fixmap_pgt[507] -> NEW PTE (0x7fb7000 0x1000) map __vsyscall_0
+                                                    // ZONE_DMA32 wait_table (0x7fb8000 0x18000)
+                                                    // ZONE_DMA wait_table (0x7fd0000 0x18000)
+                                                    // node_data[0] pglist_data (0x7fe8000 0x5000)
+                                                    // THE PTE (0x7fed000 0x1000)
+7: start=0x7feea80, end=0x7feeae8, size=0x68        // **e820_saved firmware_map_entry**
+8: start=0x7feeb00, end=0x7feeb68, size=0x68        // **e820_saved firmware_map_entry**
+9: start=0x7feeb80, end=0x7feebe8, size=0x68        // **e820_saved firmware_map_entry**
+10: start=0x7feec00, end=0x7feec68, size=0x68       // **e820_saved firmware_map_entry**
+11: start=0x7feec80, end=0x7feece8, size=0x68       // **e820_saved firmware_map_entry**
+12: start=0x7feed00, end=0x7feed68, size=0x68       // **e820_saved firmware_map_entry**
+13: start=0x7feed80, end=0x7feef08, size=0x188      // **e820_res**
+14: start=0x7feef40, end=0x7feef83, size=0x43        // ioapic_resources
+15: start=0x7feefc0, end=0x7feefd8, size=0x18        // 第1个section的usemap
+16: start=0x7fef000, end=0x7ff0000, size=0x1000      // mem_section[0]
+</code></pre>
+<br>
+
+<code>e820_mark_nosave_regions(max_low_pfn);</code> 这个函数把0-max_low_pfn=0x7ff0内的内存不是E820_RAM和E820_RESERVED_KERN(我们没有这种类型的)的都加到 LIST nosve_regions 里, 并在syslog里打印出来 PM: Registered nosave memory: %016lx - %016lx (不包括前64K)
+<pre><code class="language-c">struct nosave_region {
+    struct list_head list;
+    unsigned long start_pfn;
+    unsigned long end_pfn;
+};
+static LIST_HEAD(nosave_regions);
+
+// nosave_regions:
+// 0x9f - 0x100
+
+./print_memblock
+--reserved regions--
+0: start=0x9a000, end=0x9f000, size=0x5000          // TRAMPOLINE
+1: start=0x9fc00, end=0x100000, size=0x60400        // EBDA
+2: start=0x1000000, end=0x1d04049, size=0xd04049    // Kernel TEXT DATA BSS and extend_brk 49 bytes
+3: start=0x7200000, end=0x7400000, size=0x200000    // map_map[0] 第1个section的map
+4: start=0x796e000, end=0x79eb000, size=0x7d000     // RAMDISK
+5: start=0x7be6000, end=0x7be8000, size=0x2000      // 0xffea...的pud和pmd
+6: start=0x7fb7000, end=0x7fee000, size=0x37000     // level2_fixmap_pgt[507] -> NEW PTE (0x7fb7000 0x1000) map __vsyscall_0
+                                                    // ZONE_DMA32 wait_table (0x7fb8000 0x18000)
+                                                    // ZONE_DMA wait_table (0x7fd0000 0x18000)
+                                                    // node_data[0] pglist_data (0x7fe8000 0x5000)
+                                                    // THE PTE (0x7fed000 0x1000)
+7: start=0x7feea40, end=0x7feea60, size=0x20        // **nosave_region**
+8: start=0x7feea80, end=0x7feeae8, size=0x68        // e820_saved firmware_map_entry
+9: start=0x7feeb00, end=0x7feeb68, size=0x68        // e820_saved firmware_map_entry
+10: start=0x7feeb80, end=0x7feebe8, size=0x68        // e820_saved firmware_map_entry
+11: start=0x7feec00, end=0x7feec68, size=0x68       // e820_saved firmware_map_entry
+12: start=0x7feec80, end=0x7feece8, size=0x68       // e820_saved firmware_map_entry
+13: start=0x7feed00, end=0x7feed68, size=0x68       // e820_saved firmware_map_entry
+14: start=0x7feed80, end=0x7feef08, size=0x188      // e820_res
+15: start=0x7feef40, end=0x7feef83, size=0x43        // ioapic_resources
+16: start=0x7feefc0, end=0x7feefd8, size=0x18        // 第1个section的usemap
+17: start=0x7fef000, end=0x7ff0000, size=0x1000      // mem_section[0]
+</code></pre>
+<br>
+
+<code>x86_init.resources.reserve_resources();</code> => reserve_standard_io_resources(); 这个函数把　standard_io_resources(dma1, pic1, timer0, timer1, keyboard, keyboard, dma page reg, pic2, dma2, fpu) 都连到 ioport_resource 上.<br>
+关于resource我们遇到不少了,后边我们把它的结构给画出来.<br><br>
+
+<code>e820_setup_gap();</code> 这个函数在e820里寻找一个gap(256M-4G范围内,大小至少为0x400个page). 找到后,赋值 pci_mem_start, 并在syslog里打印出来.<br>
+我们的情况是: pci_mem_start = 0x8000000; <br>
+syslog打印出 Allocating PCI resources starting at 0x8000000 (gap: 0x8000000:0xF7FC0000)
+<pre>
+e820_saved.nr_map = 7
+0: 0                - 10000            (10000           ) E820_RESERVED
+1: 10000            - 9f000            (8f000           ) E820_RAM
+2: 9f000            - a0000            (1000            ) E820_RESERVED
+3: e8000            - 100000           (18000           ) E820_RESERVED
+4: 100000           - 7ff0000          (7ef0000         ) E820_RAM
+5: 7ff0000          - 8000000          (10000           ) E820_ACPI
+**Here is the gap**
+6: fffc0000         - 100000000        (40000           ) E820_RESERVED
+</pre>
+<br>
+
+.config里定义了 CONFIG_VT=y CONFIG_VGA_CONSOLE=y,并且efi_enable = 0, 所以 conswitchp = &vga_con; 然后并不清楚这个是做什么用的,先略过去.<br><br>
+
+<code>x86_init.oem.banner();</code> => default_banner(); syslog打印出 Booting paravirtualized kernel on bare hardware<br><br>
+
+<code>x86_init.timers.wallclock_init();</code> => x86_init_noop();<br><br>
+
+<code>mcheck_init();</code>这个完全不清楚干什么用的.<br><br>
+
+<code>arch_init_ideal_nop5();</code> 不清楚干什么用的,好像和nop指令都关系,先略过吧.<br><br>
+
+最后,我们把resource给整理一下,虽然不清楚会有什么用:
+<pre>
+ioport_resource(PCI IO) => 0x1a189a0
+PCI IO: start = 0, end = 0xffff, child = dma1
+    |- dma1        : start = 0, end = 0x1f, sibling = pic1
+    |- pic1        : start = 0x20, end = 0x21, sibling = timer0
+    |- timer0      : start = 0x40, end = 0x43, sibling = timer1
+    |- timer1      : start = 0x50, end = 0x53, sibling = keyboard
+    |- keyboard    : start = 0x60, end = 0x60, sibling = keyboard
+    |- keyboard    : start = 0x64, end = 0x64, sibling = dma page reg
+    |- dma page reg: start = 0x80, end = 0x8f, sibling = pic2
+    |- pic2        : start = 0xa0, end = 0xa1, sibling = dma2
+    |- dma2        : start = 0xc0, end = 0xdf, sibling = fpu
+    |- fpu         : start = 0xf0, end = 0xff
+
+iomem_resource (PCI mem) => 0x1a18960
+PCI mem: start = 0, end = 0xffffffffff, child = reserved
+    |- reserved   : start = 0, end = 0xffff, sibling = System RAM
+    |- System RAM : start = 0x10000, end = 0x9efff, sibling = reserved
+    |- reserved   : start = 0x9f000, end = 0x9ffff, sibling = reserved
+    |- reserved   : start = 0xe8000, end = 0xfffff, sibling = System RAM
+    |- System RAM : start = 0x100000, end = 0x7feffff, sibling = ACPI Tables, child = Kernel code
+                |- Kernel code: start = 0x1000000, end = 0x15e48db, sibling = Kernel data
+                |- Kernel data: start = 0x15e48dc, end = 0x1acc27f, sibling = Kernel bss
+                |- Kernel bss : start = 0x1baf000, end = 0x1d03fff
+    |- ACPI Tables: start = 0x7ff0000, end = 0x7ffffff
+
+ioapic_resources => 0x1be4440
+IOAPIC 0: start = 0xfec00000, end = 0xfec003ff
+</pre>
+
+<div class="bg-info pad-all">
+    <h3>到此,setup_arch()终于完了.是时候来一次回顾和总结了:</h3>
+    <ol>
+        <li>GRUB把内核加载到1M处,把内核参数配置加载到0x8c800,把initrd.img.gz加载到0x796e000.</li>
+        <li>arch/x86/boot/compressed/head_64.S不管实际物理内存有多大,直接做个4G的map,进入64位环境.然后把真正的内核解压到16M处,并根据ELF header提供的信息,把内核代码和数据段在内存里调整好位置.</li>
+        <li>内核刚开始也是不管实际物理内存有多大,直接map了512M的内核地址空间和1G的direct mapping.然后进入C语言环境.</li>
+        <li>进入C语言环境后,把idt全都设成early_idt_handler,其实就是hlt. 然后把GRUB传过来的内核参数复制到boot_params里. 再然后就初始化了 memblock, reserve了kernel text data bss, RAMDISK, EBDA.(我们到现在都在使用memblock管理内存.)</li>
+        <li>
+            start_kernel里setup_arch之前基本没做什么有用的事,重点都在setup_arch里.<br><br>
+            setup_arch首先识别了cpu,这样我们就知道物理机的cpu是哪个型号的,都有哪些feature了.<br>
+            然后初始化了 early_ioremap, 后边我们需要BIOS提供的数据,或者是ACPI提供的数据时,都要用到它.<br>
+            接着根据GRUB传过来的e820 map的数据,我们知道了物理机的实际内存情况.<br>
+            然后dmi_scan_machine,我们知道了物理机的BIOS信息和主板信息.<br>
+            前边我们不管物理机实际内存有多大,直接map了512M的内核地址空间,在这里我们把多做的map都给清理掉,实际上内核仅占了16M-30M这14M内存.<br>
+            同样的,前边做的1GB的direct mapping也要修正过来,根据e820提供的信息,把0-126M(page size 2M),126M-0x7ff0000(page size 4K)做好了map.<br>
+            接下来读取ACPI的数据,获取物理的配置情况.不过除了取得了cpu的数量和IO_APIC以及INTERRUPT_OVERRIDE信息外,别的信息还都没有用起来呢.<br>
+            除了修正了page map之外,setup_arch还初始化了两个内存管理的视角,一个是node->zone,一个是section_map.<br>
+            由于我们的内存是UMA的,所以fake了一个dummy node 0,在这个node里,又把内存分为 ZONE_DMA(0-16M), ZONE_DMA32(16M-4G), ZONE_NORMAL(4G+)<br>
+            section_map把内存分为128M一个section,每个section的每个page都有一个struct page与之对应,来描述这个page的详细情况. section_mem_map用的内存地址空间既不是kernel space,也不是direct mapping, 而是 0xffea00000... 的,源代码里附带的文档说这个地址空间是  virtual memory map (1TB), 但目前还不理解为什么要这样.<br>
+        </li>
+    </ol>
+</div>
+
+
+<script src="prism.js"></script>
+</div>
+</body>
+</html>
