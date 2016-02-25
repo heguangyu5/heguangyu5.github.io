@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="container">
+
+
+
+
+
+
+
+<h1 class="page-header">start_kernel after setup_arch</h1>
+
+<code>mm_init_owner(&init_mm, &init_task);</code> => init_mm.owner = &init_task;<br><br>
+
+<code>setup_command_line(command_line);</code> 在setup_arch里把boot_command_line copy到了command_line里,然后把start_kernel里的这个command_line指针指向setup_arch里的command_line. 这个函数做的事就是分配两块内存,把boot_command_line和command_line分别再copy一份. (BOOT_IMAGE=/bzImage, len = 19)
+<pre>
+// bochs: writemem "/tmp/memblock.memdump" 0xffffffff81b3e9a0 64
+// bochs: writemem "/tmp/memblock.memory.memdump" 0xffffffff81b3f200 2048
+// bochs: writemem "/tmp/memblock.reserved.memdump" 0xffffffff81b3e9e0 2048
+
+$ ./print_memblock /tmp/memblock.memdump /tmp/memblock.memory.memdump /tmp/memblock.reserved.memdump
+sizeof(struct memblock) = 64
+sizeof memblock.memory/reserved = INIT_MEMBLOCK_REGIONS * sizeof(struct memblock_region) = 2048
+memblock.current_limit  = 0x7ff0000
+memblock.memory_size    = 0x7f7f000
+memblock.memory.cnt     = 0x2
+memblock.memory.max     = 0x80
+memblock.memory.regions = 0xffffffff81b3f200
+memblock.reserved.cnt     = 0x14
+memblock.reserved.max     = 0x80
+memblock.reserved.regions = 0xffffffff81b3e9e0
+--memory regions--
+0: start=0x10000, end=0x9f000, size=0x8f000
+1: start=0x100000, end=0x7ff0000, size=0x7ef0000
+--reserved regions--
+0: start=0x9a000, end=0x9f000, size=0x5000          // TRAMPOLINE
+1: start=0x9fc00, end=0x100000, size=0x60400        // EBDA
+2: start=0x1000000, end=0x1d04049, size=0xd04049    // Kernel TEXT DATA BSS and extend_brk 49 bytes
+3: start=0x7200000, end=0x7400000, size=0x200000    // map_map[0] 第1个section的map
+4: start=0x796e000, end=0x79eb000, size=0x7d000     // RAMDISK
+5: start=0x7be6000, end=0x7be8000, size=0x2000      // 0xffea...的pud和pmd
+6: start=0x7fb7000, end=0x7fee000, size=0x37000     // level2_fixmap_pgt[507] -> NEW PTE (0x7fb7000 0x1000) map __vsyscall_0
+                                                    // ZONE_DMA32 wait_table (0x7fb8000 0x18000)
+                                                    // ZONE_DMA wait_table (0x7fd0000 0x18000)
+                                                    // node_data[0] pglist_data (0x7fe8000 0x5000)
+                                                    // THE PTE (0x7fed000 0x1000)
+7: start=0x7fee9c0, end=0x7fee9d4, size=0x14        // **static_command_line**
+8: start=0x7feea00, end=0x7feea14, size=0x14        // **saved_command_line**
+9: start=0x7feea40, end=0x7feea60, size=0x20        // nosave_region
+10: start=0x7feea80, end=0x7feeae8, size=0x68       // e820_saved firmware_map_entry
+11: start=0x7feeb00, end=0x7feeb68, size=0x68       // e820_saved firmware_map_entry
+12: start=0x7feeb80, end=0x7feebe8, size=0x68       // e820_saved firmware_map_entry
+13: start=0x7feec00, end=0x7feec68, size=0x68       // e820_saved firmware_map_entry
+14: start=0x7feec80, end=0x7feece8, size=0x68       // e820_saved firmware_map_entry
+15: start=0x7feed00, end=0x7feed68, size=0x68       // e820_saved firmware_map_entry
+16: start=0x7feed80, end=0x7feef08, size=0x188      // e820_res
+17: start=0x7feef40, end=0x7feef83, size=0x43       // ioapic_resources
+18: start=0x7feefc0, end=0x7feefd8, size=0x18       // 第1个section的usemap
+19: start=0x7fef000, end=0x7ff0000, size=0x1000     // mem_section[0]
+</pre>
+
+<code>setup_nr_cpu_ids();</code>
+<pre><code class="language-c">// @see kernel/smp.c#0665
+// 注释里写的也很清楚了: An arch may set nr_cpu_ids earlier if needed, so this would be redundant.
+nr_cpu_ids = find_last_bit(cpumask_bits(cpu_possible_mask),NR_CPUS) + 1;
+</code></pre>
+<br>
+
+
+
+<code>setup_per_cpu_areas();</code>
+<pre><code class="language-c">// syslog里打印出 setup_percpu: NR_CPUS:256 nr_cpumask_bits:256 nr_cpu_ids:1 nr_node_ids:1
+pcpu_chosen_fc = PCPU_FC_AUTO; // 默认值,可以通过GRUB命令行参数 percpu_alloc 设定
+PERCPU_FIRST_CHUNK_RESERVE = PERCPU_MODULE_RESERVE = 8 &lt;&lt; 10 = 8K = 0x2000
+PERCPU_DYNAMIC_RESERVE = 20 &lt;&lt; 10 = 20K = 0x5000
+
+pcpu_embed_first_chunk(
+    PERCPU_FIRST_CHUNK_RESERVE, // 0x2000 = 8K
+    dyn_size,                   // 0x5000 = 20K
+    atom_size,                  // PMD_SIZE = 0x200000 = 2M
+    pcpu_cpu_distance,          // 这个函数返回 LOCAL_DISTANCE = 10
+    pcpu_fc_alloc,              // 使用memblock分配内存
+    pcpu_fc_free                // free掉memblock分配的内存
+);
+    struct pcpu_alloc_info *ai = pcpu_build_alloc_info(
+        reserved_size,  // 0x2000 = 8K
+        dyn_size,       // 0x5000 = 20K
+        atom_size,      // 0x200000 = 2M
+        cpu_distance_fn // pcpu_cpu_distance, 返回 10
+    );
+        static_size = __per_cpu_end (0x14d00) - __per_cpu_start (0) = 0x14d00; // @see arch/x86/kernel/vmlinux.lds.S
+                                                                               // @see include/asm-generic/vmlinux.lds.h#0714
+        size_sum = static_size(0x14d00) + reserved_size(8K) + dyn_size(20K) = 0x1bd00 = 0x1c000 = 112K
+        dyn_size = 0x5300
+        min_unit_size = 0x1c000 = 112K
+        alloc_size = 2M
+        max_upa = 16
+        // 最终
+        struct pcpu_alloc_info ai = {
+            u64 static_size     = 0x14d00,
+            u64 reserved_size   = 0x2000,
+            u64 dyn_size        = 0x5300,
+            u64 unit_size       = 0x200000,
+            u64 atom_size       = 0x200000,
+            u64 alloc_size      = 0x200000,
+            u64 __ai_size       = 0x1000,
+            int nr_groups       = 1,
+            struct pcpu_group_info groups[] = {
+                {
+                    int nr_units            = 1,
+                    u64 base_offset         = 0,
+                    unsigned int *cpu_map   = 0x7fb6058
+                }
+            }
+        };
+    // pcpu_build_alloc_info得到了nr_groups,nr_units,然后为每个group分配一块内存,将kernel里的percpu数据copy进去.
+    // 然后更新了每个group的base_offset
+    syslog里打印出 PERCPU: Embedded 0x1c pages/cpu @0x7c00000 s0x14d00 r0x2000 d0x5300 u0x200000
+    pcpu_setup_first_chunk(ai, base = 0x7c00000);
+    // 这个函数的注释里解释清楚了 static_size, reserved_size, dyn_size 的用处:
+    // static_size 就是kernel里定义的percpu变量数据, reserved_size 紧跟在 static_size 后边, 这块内存主要是留给 module 用的,
+    // dyn_size 才是用来动态分配内存的, 这之后一直到 unit_size 是没有使用的内存
+        pcpu_nr_groups      = 1
+        pcpu_group_offsets  [0=0]           // memblock alloc
+        pcpu_group_sizes    [0=0x200000]    // memblock alloc
+        pcpu_unit_map       [0=0x7fee900]   // memblock alloc
+        pcpu_unit_offsets   [0=0x7fee8c0]   // memblock alloc
+        pcpu_unit_pages = 0x200
+        pcpu_unit_size  = 0x200000
+        pcpu_atom_size  = 0x200000
+        pcpu_chunk_struct_size = sizeof(struct pcpu_chunk) + pcpu_unit_pages / 64(bit) * sizeof(long) 8  // 用bitmap表示每个page的使用情况?
+                               = 0x80
+        pcpu_nr_slots = 19 + 2 = 21 = 0x15
+        pcpu_slot = 21 * sizeof(pcpu_slot[0] struct list_head) = 0x7fee740 // memblock alloc
+        schunk(static percpu area chunk) =  0x7fee6c0// memblock alloc
+                                            // struct pcpu_chunk的后边紧跟的是记录这个chunk每个page的使用情况的bitmap
+                                            // 这样说的话, chunk和unit是一个意思???
+        schunk->free_size = reserved_size = 0x2000;
+        pcpu_reserved_chunk = schunk;
+        pcpu_reserved_chunk_limit = static_size + reserved_size;
+        schunk->contig_hint = schunk->free_size = 0x2000;
+        dchunk      = 0x7fee640 // memblock alloc
+
+        pcpu_first_chunk = dchunk = 0x7fee640 => struct pcpu_chunk {
+            struct list_head list, (0x7fee800)
+            int free_size = 0x5300,
+            int contig_hint = 0x5300,
+            void *base_addr = 0x7c00000,
+            int map_used = 2,
+            int map_alloc = 0x80,
+            int *map = 0x1b3df60,
+            void *data = 0,
+            bool immutable = 1,
+            unsigned long populated = 0xFFFF....FFFF;
+        };
+
+        pcpu_base_addr = 0x7c00000
+/*
+./print_memblock
+--reserved regions--
+0: start=0x9a000, end=0x9f000, size=0x5000          // TRAMPOLINE
+1: start=0x9fc00, end=0x100000, size=0x60400        // EBDA
+2: start=0x1000000, end=0x1d04049, size=0xd04049    // Kernel TEXT DATA BSS and extend_brk 49 bytes
+3: start=0x7200000, end=0x7400000, size=0x200000    // map_map[0] 第1个section的map
+4: start=0x796e000, end=0x79eb000, size=0x7d000     // RAMDISK
+5: start=0x7be6000, end=0x7be8000, size=0x2000      // 0xffea...的pud和pmd
+6: start=0x7c00000, end=0x7c1c000, size=0x1c000     // **static percpu area**
+7: start=0x7fb7000, end=0x7fee000, size=0x37000     // level2_fixmap_pgt[507] -> NEW PTE (0x7fb7000 0x1000) map __vsyscall_0
+                                                    // ZONE_DMA32 wait_table (0x7fb8000 0x18000)
+                                                    // ZONE_DMA wait_table (0x7fd0000 0x18000)
+                                                    // node_data[0] pglist_data (0x7fe8000 0x5000)
+                                                    // THE PTE (0x7fed000 0x1000)
+8: start=0x7fee640, end=0x7fee890, size=0x250       // **dchunk (0x7fee640 0x80)**
+                                                    // **schunk (0x7fee6c0 0x80)**
+                                                    // **pcpu_slot (0x7fee740 0x150)**
+9: start=0x7fee8c0, end=0x7fee8c8, size=0x8         // **pcpu_unit_offsets**
+10: start=0x7fee900, end=0x7fee904, size=0x4        // **pcpu_unit_map**
+11: start=0x7fee940, end=0x7fee948, size=0x8        // **pcpu_group_sizes**
+12: start=0x7fee980, end=0x7fee988, size=0x8        // **pcpu_group_offsets**
+13: start=0x7fee9c0, end=0x7fee9d4, size=0x14        // static_command_line
+14: start=0x7feea00, end=0x7feea14, size=0x14        // saved_command_line
+15: start=0x7feea40, end=0x7feea60, size=0x20        // nosave_region
+16: start=0x7feea80, end=0x7feeae8, size=0x68       // e820_saved firmware_map_entry
+17: start=0x7feeb00, end=0x7feeb68, size=0x68       // e820_saved firmware_map_entry
+18: start=0x7feeb80, end=0x7feebe8, size=0x68       // e820_saved firmware_map_entry
+19: start=0x7feec00, end=0x7feec68, size=0x68       // e820_saved firmware_map_entry
+20: start=0x7feec80, end=0x7feece8, size=0x68       // e820_saved firmware_map_entry
+21: start=0x7feed00, end=0x7feed68, size=0x68       // e820_saved firmware_map_entry
+22: start=0x7feed80, end=0x7feef08, size=0x188      // e820_res
+23: start=0x7feef40, end=0x7feef83, size=0x43       // ioapic_resources
+24: start=0x7feefc0, end=0x7feefd8, size=0x18       // 第1个section的usemap
+25: start=0x7fef000, end=0x7ff0000, size=0x1000     // mem_section[0]
+*/
+
+分析了上边的 pcpu_embed_first_chunk 根本弄不懂这个percpu memory allocator是怎么回事,但结合 pcpu_alloc() 容易理解一些了.
+percpu的关键在于每个cpu都有一个, static的很容易明白, int var[NR_CPUS]; dynamic的是这样的: 一块大内存看作 MemoryBlock[NR_CPUS].
+然后需要一个办法把每个CPU的MemoryBlock的使用情况管理起来,因为每个CPU的MemoryBlock使用情况都是一致的,那个用一个数据结构管理就可以了.所以就有了
+
+struct pcpu_chunk {
+    void *data; // 相当于 MemoryBlock[NR_CPUS]
+}
+
+当然需要知道一个MemoryBlock有多少空余空间可以用,以及有多少连续的空余空间可以用,这样当一个请求过来说要多大的内存块时,一下子就可以判断出来这个Block能不能满足.然后就有了
+
+struct pcpu_chunk {
+    int free_size;      // 每个MemoryBlock里有多少空余空间
+    int contig_hint;    // 每个MemoryBlock里有多少连续的空余空间
+    void *data;
+}
+
+当这个MemoryBlock可以满足内存分配请求时,接下来就要分配出内存块来,那就需要有一个办法来详细的记录哪些内存已经分配出去了,哪些还空闲着.
+
+struct pcpu_chunk {
+    int free_size;
+    int contig_hint;
+    int map_used;
+    int map_alloc;
+    int *map;       // 额外分配个 int map[map_alloc] 数组出来,每分配出去一块内存,就记下来. 
+                    // 比如第一次分配出去100字节, map[0] = -100 (用负数表示分配出去了)
+                    // 第二次分配出去200字节, map[1] = -200
+                    // 那这个map_alloc定为多大呢?默认定为 16, map_used记录着已经用了几个了
+                    // 当不够用时,就要分配一个更大的map,然后把现在的map数据copy到新的里去,原来的就free掉,有点realloc的意思
+    void *data;
+}
+
+当percpu真正使用起来后,会有很多个chunk,并且每个chunk的free_size大小就不一样了,这时间一个请求过来,需要有个办法能很快知道哪些chunk能满足要求,所以就要按chunk的free_size大小给排个序.怎么排呢?
+
+pcpu_slot[] = {
+    sizeA => {chunkA1, chunkA2, chunkA3 ...},
+    sizeB => {chunkB1, chunkB2, chunkB3 ...}
+}
+
+dynamic percpu memory alloc这样做了之后,那么原来的 static 的可不可以做下统一呢?当然疑问是可以的.
+分配一个chunk(static chunk),这个chunk立马有一个内存已经分配出去了,因为static的percpu变量数据编译完成后我们就知道大小了,然后这个chunk的free_size就等于reserved_size.
+然后再分配一个chunk(dynamic chunk),这个chunk完全是个新chunk,只不过free_size大小为 dyn_size.
+
+这两个chunk ready之后,接下来即使内核的内存管理还没有好,也可以动态分配percpu内存了.
+
+pcpu_embed_first_chunk()返回0,继续向下执行.
+
+delta = pcpu_base_addr - __per_cpu_start = 0x7c00000
+接着一个for循环,把每个cpu的 per_cpu_offset, this_cpu_off都设好,并且在当前cpu(boot cpu)上用上了新的gdt.
+实际上这个for循环做的事是这样的: 
+系统启动的时候,还不知道有多少个cpu,当定义percpu变量时,实际上只定义了一份,但标明这个变量是percpu变量,编译的时候要编译到一个特定的section里,
+在这之前,boot cpu一直用着定义的这一份,前边 pcpu_embed_first_chunk 时,把 percpu section每个cpu都copy了一份,
+现在虽然其它cpu还没有运行起来,但boot cpu有了自己的那一份,于是就用自己的,不再用先前定义的了.
+这时看一下gdtr,指向 0x7c04000, 当前cpu的那份是从0x7c00000开始的,就对上了.
+
+再理一下percpu的使用问题: 
+    static定义的percpu变量在编译时那个percpu section按从地址0开始,现在访问这些变量通过宏定义 per_cpu(var, cpu), 
+    这个宏定义做的事就是把地址 var + per_cpu_offset[cpu] 处的内容返回, 即 *(var + per_cpu_offset[cpu]). 就拿boot cpu的gdt_page举例吧: 
+        编译后,gdt_page的地址是 0x4000,这个在System.map里可以查到,boot cpu的　per_cpu_offset[0] = 0x7c00000, 
+        所以 per_cpu(gdt_page, 0) = 0x4000 + 0x7c00000 = 0x7c04000
+    对于dynamic alloc的变量,关键在于返回时要处理一下,pcpu_alloc时只在chunk的MemoryBlock[0]上分配,拿到的地址也是MemoryBlock[0]上的地址,
+    显然用这个地址是无法访问到其它cpu上对应的变量的,那就要把这个地址减去pcpu_base_addr,也就是0x7c00000.
+    然后再次使用时用per_cpu宏再加上offset就能找到对应cpu上的变量了.
+
+上边写的比较乱,但确实搞明白了percpu是怎么回事,回头有了4核的bochs,再重新整理下.
+
+// .config里没有定义 CONFIG_CPUMASK_OFFSTACK, 而下边这两个函数都要用到 alloc_bootmem_cpumask_var, 这个函数是个空函数,不产生任何实际指令
+// 所以下边这两个函数啥都没做
+setup_node_to_cpumask_map();
+setup_cpu_local_masks();
+</code></pre>
+
+setup_per_cpu_areas()初始化好了 pcpu memory allocator, 后边要想使用percpu变量就很容易了. 但有个疑问是虽然 static chunk 和 dynamic chunk有了,它们对应的内存也分配了,前者大小是 0x2000, 后者大小是 0x5300, 加上static size = 0x14d00,总大小是0x1c000,但是chunk.data还没有设,这后边怎么用呢?<br>
+<small class="text-red">OK, 弄清楚了,chunk.data指向的是一个vm_struct的链表,这个链表记录着当前chunk具体用的物理内存情况,schunk和dchunk不是vmalloc分配的,所以它们的data为NULL,不需要设.</small><br><br>
+
+<p class="text-red mar-btm">
+现在, pcpu_reserved_chunk = schunk, 注意 pcpu_setup_first_chunk() 的最后, pcpu_first_chunk = dchunk, 并且 pcpu_chunk_relocate(pcpu_first_chunk, -1) 把 dchunk 加到了 pcpu_slot 里边. 后边如果需要 alloc percpu memory, reserved 从 schunk 里分配, 非reserved从dchunk里分配.
+</p>
+
+
+<code>smp_prepare_boot_cpu(); </code> => native_smp_prepare_boot_cpu(); 这个函数做事倒挺简单的: <br>
+1. switch_to_new_gdt(me), 这个在 setup_per_cpu_areas()里已经做过一次了<br>
+2. cpumask_set_cpu(me, cpu_callout_mask), 还没搞清cpu_callout_mask是做什么用的<br>
+3. cpu_state[me] = CPU_ONLINE;<br>
+
+这里值得一提的是为什么调用函数 smp_process_id() 就能取得当前cpu的id.
+<pre>
+在 arch/x86/kernel/setup_percpu.c#0024 里定义了 percpu 变量 cpu_number.
+
+DEFINE_PER_CPU(int, cpu_number);
+
+在 pcpu_embed_first_chunk() 时把cpu_number给每个cpu都复制了一份, 然后在接下来的for循环里给这个变量赋值了.
+再接下来,给cpu 0(也就是boot cpu了) switch_to_new_gdt(), 在这个函数里调用了 load_percpu_segment(). 这个函数 wrmsr 写入了 GS_BASE = 0x7c00000.
+然后读取的时候 %gs:&cpu_number 就取到当前cpu的cpu_number的值了.
+照这样说,static定义的percpu变量都可以通过%gs:var_addr取值.
+
+@see AMD-Volume2 page 72: Segment Registers in 64-Bit Mode
+在64位环境里,当计算内存地址是,cs,ds,es,ss都被忽略了,但是fs和gs还都参与计算.这里有提到gs.base.
+</pre>
+<br>
+
+<code>build_all_zonelists(NULL);</code>
+<pre><code class="language-c">set_zonelist_order();
+// user_zonelist_order 默认等于 ZONELIST_ORDER_DEFAULT, 可以通过GRUB命令行参数 numa_zonelist_order 来设定
+    current_zonelist_order = default_zonelist_order();
+    // setup_arch时我们知道0-16M是ZONE_DMA, 16M-4G是ZONE_DMA32,4G+是ZONE_NORMAL,我们只有一个dummy node,所以如果内存大于4G,就会有ZONE_NORMAL
+    // 这时返回 ZONELIST_ORDER_NODE. 如果小于4G, low_kmem_size == total_size > total_size / 2, 所以对我们来说, 不管内存多大,最终
+    // current_zonelist_order = ZONELIST_ORDER_NODE = 1
+__build_all_zonelists(NULL);
+    build_zonelists(pgdat);
+// 没太看明白这个函数是做什么的,不过可以肯定的是,它和 node_data.node_zonelists有关,后边把node_zonelists打印出来看看就知道了
+mminit_verify_zonelist(); // 由于 mminit_loglevel &lt; MMINIT_VERIFY, 这个函数早早的返回了, 什么也没做
+cpuset_init_current_mems_allowed(); // 把current->mems_allowed的所有bits全置为1
+vm_total_pages = nr_free_pagecache_pages(); // = 0x7bda = 0xf52 + 0x6e68
+page_group_by_mobility_disabled = 0;
+// syslog里打印出
+Built 1 zonelists in Node order, mobility grouping on. Total pages: 0x7bda
+Policy zone: DMA32
+
+// bochs: writemem "/tmp/node_data.memdump" 0xffff880007fe8000 0x5000
+</code></pre>
+<br>
+
+<code>page_alloc_init();</code> => hotcpu_notifier(page_alloc_cpu_notify, 0); cpu_china (0x1c2c7e0) 是一个单链表,链表里的每个元素struct notifier_block都有一个notifier_call和priority;<br>
+显然这是按priority排好序的单链表,等需要的时候一个一个的调用对应的notifier_call.<br>
+<pre><code class="language-c">struct notifier_block {
+	int (*notifier_call)(struct notifier_block *, unsigned long, void *);
+	struct notifier_block __rcu *next;
+	int priority;
+};</code></pre>
+page_alloc_cpu_notify()做的事是当CPU_DEAD或CPU_DEAD_FROZEN时free掉它占用的内存及其它不太清楚是什么东西.<br><br>
+
+<code>parse_early_param();</code>我们在setup_arch()里已经调用过这个函数了,所以这次调用发现done=1就返回了.<br><br>
+
+<code>parse_args();</code>
+<pre><code class="language-c">parse_args("Booting kernel", static_command_line, __start___param,
+   __stop___param - __start___param,
+   &unknown_bootoption);
+
+   /* Built-in module parameters. */				\
+__param : AT(ADDR(__param) - LOAD_OFFSET) {			\
+	VMLINUX_SYMBOL(__start___param) = .;			\
+	*(__param)						\
+	VMLINUX_SYMBOL(__stop___param) = .;			\
+}
+
+显然 __start___param 和 __stop___param 之间是很多的kernel_param, parse_args() 的逻辑我们很熟悉了, 根据参数名称匹配上之后,调用对应的处理函数.
+
+我们没有通过GRUB给kernel传递任何参数,所以这个函数什么也做不了. 前边也提到,物理机会传递root= 和 ro 两个参数,
+这两个参数对应的数据结构在 .init.setup section, 也不在这个函数里处理.
+</code></pre>
+<br>
+
+<code>pidhash_init();</code>
+<pre><code class="language-c">nr_kernel_pages = 0xf52 + 0x6e68 = 0x7bda
+0x7bda + (1 &lt;&lt; 8) - 1 = 0x7eb9
+0x7eb9 &gt;&gt; 8 = 0x7e
+0x7e &lt;&lt; 8 = 0x7e00
+0x7e00 &gt;&gt; 6 = 0x1f8
+round_pow_of_two = 0x200
+log2qty = 9
+alloc_bootmem_nopanic( 8 &lt;&lt; 9 = 4096 = 0x1000);
+// syslog里打印出
+PID hash table entries: 512 (order: 0, 4096 bytes)
+pidhash_size = 9
+/*
+./print_memblock
+--reserved regions--
+0: start=0x9a000, end=0x9f000, size=0x5000          // TRAMPOLINE
+1: start=0x9fc00, end=0x100000, size=0x60400        // EBDA
+2: start=0x1000000, end=0x1d04049, size=0xd04049    // Kernel TEXT DATA BSS and extend_brk 49 bytes
+3: start=0x7200000, end=0x7400000, size=0x200000    // map_map[0] 第1个section的map
+4: start=0x796e000, end=0x79eb000, size=0x7d000     // RAMDISK
+5: start=0x7be6000, end=0x7be8000, size=0x2000      // 0xffea...的pud和pmd
+6: start=0x7c00000, end=0x7c1c000, size=0x1c000     // static percpu area
+7: start=0x7fb6000, end=0x7fee000, size=0x38000     // **pid_hash (0x7fb6000 0x1000)**
+                                                    // level2_fixmap_pgt[507] -> NEW PTE (0x7fb7000 0x1000) map __vsyscall_0
+                                                    // ZONE_DMA32 wait_table (0x7fb8000 0x18000)
+                                                    // ZONE_DMA wait_table (0x7fd0000 0x18000)
+                                                    // node_data[0] pglist_data (0x7fe8000 0x5000)
+                                                    // THE PTE (0x7fed000 0x1000)
+8: start=0x7fee640, end=0x7fee890, size=0x250       // dchunk (0x7fee640 0x80)
+                                                    // schunk (0x7fee6c0 0x80)
+                                                    // pcpu_slot (0x7fee740 0x150)
+9: start=0x7fee8c0, end=0x7fee8c8, size=0x8         // pcpu_unit_offsets
+10: start=0x7fee900, end=0x7fee904, size=0x4        // pcpu_unit_map
+11: start=0x7fee940, end=0x7fee948, size=0x8        // pcpu_group_sizes
+12: start=0x7fee980, end=0x7fee988, size=0x8        // pcpu_group_offsets
+13: start=0x7fee9c0, end=0x7fee9d4, size=0x14        // static_command_line
+14: start=0x7feea00, end=0x7feea14, size=0x14        // saved_command_line
+15: start=0x7feea40, end=0x7feea60, size=0x20        // nosave_region
+16: start=0x7feea80, end=0x7feeae8, size=0x68       // e820_saved firmware_map_entry
+17: start=0x7feeb00, end=0x7feeb68, size=0x68       // e820_saved firmware_map_entry
+18: start=0x7feeb80, end=0x7feebe8, size=0x68       // e820_saved firmware_map_entry
+19: start=0x7feec00, end=0x7feec68, size=0x68       // e820_saved firmware_map_entry
+20: start=0x7feec80, end=0x7feece8, size=0x68       // e820_saved firmware_map_entry
+21: start=0x7feed00, end=0x7feed68, size=0x68       // e820_saved firmware_map_entry
+22: start=0x7feed80, end=0x7feef08, size=0x188      // e820_res
+23: start=0x7feef40, end=0x7feef83, size=0x43       // ioapic_resources
+24: start=0x7feefc0, end=0x7feefd8, size=0x18       // 第1个section的usemap
+25: start=0x7fef000, end=0x7ff0000, size=0x1000     // mem_section[0]
+*/
+
+static struct hlist_head *pid_hash;
+
+struct hlist_head {
+	struct hlist_node *first;
+};
+
+struct hlist_node {
+	struct hlist_node *next, **pprev;
+};
+</code></pre>
+这个函数初始化了一个hash table,这个hash table有512个entries,每个entry指向 hlist_node;<br><br>
+
+<code>vfs_caches_init_early();</code> 由于 hashdist = 1, dcache_init_early() 和 inode_init_early() 早早的就返回了,什么也没做.<br><br>
+
+<code>sort_main_extable();</code> Sort the kernel's built-in exception table 这个table的数据结构挺简单,但不清楚这个table是怎么弄出来的以及什么时间用得到.
+<pre><code class="language-c">/*
+ * The exception table consists of pairs of addresses: the first is the
+ * address of an instruction that is allowed to fault, and the second is
+ * the address at which the program should continue.  No registers are
+ * modified, so it is entirely up to the continuation code to figure out
+ * what to do.
+ *
+ * All the routines below use bits of fixup code that are out of line
+ * with the main instruction path.  This means when everything is well,
+ * we don't even have to jump over them.  Further, they do not intrude
+ * on our cache or tlb entries.
+ */
+struct exception_table_entry {
+    unsigned long insn, fixup;
+};</code></pre>
+<br>
+
+<code>trap_init();</code><br>
+idt_table定义在arch/x86/kernel_head_64.S里,大小为 256 * 16 字节,在long mode下,每个entry是16字节.可以看到,idt_table在bss段,刚开始是空的.<br>
+在x86_64_start_kernel()里,调用set_intr_gate将处理函数初始化为early_idt_handers[i].<br>
+在setup_arch() -> early_trap_init()里,把1,3,14的处理函数分别设为debug,int3,page_fault<br>
+在这个函数里,将0-19还没设上的都设对了,并且把0-31在used_vectors全都标记上,我们知道20-31是intel自己保留着给将来使用的.<br>
+<p class="text-red">注: UnderStandingKernel这本书显然有点老了,Initializing the Interrupt Descriptor Table部分的描述和代码已经差很多了.仔细阅读代码我们可以发现:set handler时只用了两个函数,一个是set_intr_gate(dpl=0,set_intr_gate_ist只是多了个stack),一个是set_system_intr_gate(dpl=3).</p>
+.config里定义了CONFIG_IA32_EMULATION=y,所以把0x80关联到ia32_syscall上,并在used_vectors里标记上.<br>
+x86_init.irqs.trap_init() => x86_init_noop, 所以这个函数就剩下cpu_init()要搞清楚了.<br>
+<pre><code class="language-c">cpu_init();
+    cpu = stack_smp_processor_id();
+    // 在arch/x86/kernel_head_64.S里,我们把%rsp(栈顶)设为init_thread_union+THREAD_SIZE-8, init_thread_union定义在
+    // arch/x86/kernel/init_task.c里, init_thread_union = {INIT_THREAD_INFO(init_task)}
+    // 在UnderStandingKernel的第85页,对thread_union有清楚的解释,默认THREAD_SIZE=8K, %rsp & 0xffffe000 就能得到 thread_info
+    // 然后就能取到cpu了
+关于cpu方面的知识还不够,cpu_init先略过去吧.
+</code></pre>
+
+</div>
+<script src="prism.js"></script>
+</body>
+</html>
