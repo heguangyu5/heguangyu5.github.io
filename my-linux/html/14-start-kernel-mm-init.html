@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="container">
+
+
+<h1 class="page-header">mm_init()</h1>
+
+<code>page_cgroup_init_flatmem();</code> 空函数,不产生任何实际指令.<br><br>
+
+<code>mem_init();</code>
+<pre><code class="language-c">pci_iommu_alloc();
+    dma32_free_bootmem(); // 空函数,不产生任何实际指令
+    sort_iommu_table(__iommu_table, __iommu_table_end);
+        // @see arch/x86/include/asm/iommu_table.h
+        // @see http://developer.amd.com/community/blog/2008/09/01/iommu/
+        // @see https://en.wikipedia.org/wiki/Input%E2%80%93output_memory_management_unit
+        // @see https://en.wikipedia.org/wiki/List_of_IOMMU-supporting_hardware
+        // @see http://support.amd.com/TechDocs/48882_IOMMU.pdf
+        // @see http://osidays.com/osidays/wp-content/uploads/2014/12/Final_OSI2014_IOMMU_DetailedView_Sanil_Anurup.pdf
+        __iommu_table是通过IOMMU_INIT_POST(add 2 entries),IOMMU_INIT_FINISH(add 3 entries),IOMMU_INIT(add one entry)编译出来的.
+        sizeof(struct iommu_table_entry) = 40
+        __iommu_table[6] = {
+            IOMMU_INIT_FINISH(pci_xen_swiotlb_detect, 0, pci_xen_swiotlb_init, 0); // pci-swiotlb-xen.c
+            IOMMU_INIT(pci_swiotlb_detect_4gb, pci_swiotlb_detect_override, pci_swiotlb_init, pci_swiotlb_late_init); // pci-swiotlb.c
+            IOMMU_INIT_FINISH(pci_swiotlb_detect_override, pci_xen_swiotlb_detect, pci_swiotlb_init, pci_swiotlb_late_init); // pci-swiotlb.c
+            IOMMU_INIT_POST(gart_iommu_hole_init); // pci-gart_64.c
+            IOMMU_INIT_POST(detect_calgary); // pci-calgary_64.c
+            IOMMU_INIT_FINISH(amd_iommu_detect, gart_iommu_hole_init, 0, 0); // amd_iommu_init.c
+        }
+        // 大概看了几眼
+        //  1. PCI System Architecture
+        //  2. PCI_Express_Base_Specification_Revision_3.0
+        //  3. AMD I/O Virtualization Technology (IOMMU) Specification
+        // 后,虽然对PCI,PCIe,IOMMU有了模糊的认识,但还是不清楚是怎么工作起来的.
+        #define IOMMU_FINISH_IF_DETECTED (1<<0)
+        #define IOMMU_DETECTED		 (1<<1)
+        struct iommu_table_entry {
+	        initcall_t	detect;
+	        initcall_t	depend;
+	        void		(*early_init)(void); /* No memory allocate available. */
+	        void		(*late_init)(void); /* Yes, can allocate memory. */
+	        int		flags;
+        };
+        __iommu_table[6] = { // 按depend关系排个序
+            // detect                     depend                        early_init            late_init             flags(1-finish, 2-detected)
+            {pci_xen_swiotlb_detect,      0,                           pci_xen_swiotlb_init, 0,                     1},
+            {pci_swiotlb_detect_override, pci_xen_swiotlb_detect,      pci_swiotlb_init,     pci_swiotlb_late_init, 1},
+            {pci_swiotlb_detect_4gb,      pci_swiotlb_detect_override, pci_swiotlb_init,     pci_swiotlb_late_init, 0},
+            {gart_iommu_hole_init,        pci_swiotlb_detect_4gb,      0,                    0,                     0},
+            {detect_calgary,              pci_swiotlb_detect_4gb,      0,                    0,                     0},
+            {amd_iommu_detect,            gart_iommu_hole_init,        0,                    0,                     1}
+        }
+    check_iommu_entries(__iommu_table, __iommu_table_end); // 仅仅是检查下,别有循环依赖就好,从上边的table我们清楚的看到,没有循环依赖
+    接下来一个for循环,调用每个entry的detect(),如果detect()返回值大于0,则标记下IOMMU_DETECTED,并执行early_init,如果这个entry标明了finish,就结束了.
+    虽然还不清楚detect和early_init的逻辑,但基本上可以确定,这是在看硬件配置上有没有IOMMU设备,如果有就early_init.
+    // pci_swiotlb_detect_4gb, 如果内存大于4GB并且没有明确指明no_iommu,那么这个函数就返回1了,此时就要执行pci_swiotlb_init做early_init了.
+    // 不过现在我们只有128M内存,这个函数返回0
+    // detect_calgary在BIOS EBDA内存块里寻找一个叫rio_table_hdr的东西,如果找到了,则进一步用read_pci_config去找IOMMU device.
+    // Documentation/x86/x86_64/boot-options.txt 有对iommu的介绍, calgary iommu是IBM服务器的
+    // amd_iommu_detect是去读取acpi table判断是否有iommu的,bochs没有
+    最终,没有detect到iommu,所以这个函数什么也没做.不过如果有了6G内存的bochs,就要用soft iommu了.
+
+numa_free_all_bootmem();
+    free_all_bootmem_node(); // mm/nobootmem.c#0136
+        register_page_bootmem_info_node(pgdat); // 空函数
+    free_all_memory_core_early();
+        get_free_all_memory_range();
+        这里用到了 memblock 和 early_node_map
+        memblock.memory来自e820的RAM部分,memblock.reserved是程序在运行过程中已经使用了的内存
+        // bochs: writemem "/tmp/memblock.memdump" 0xffffffff81b3e9a0 64
+        // bochs: writemem "/tmp/memblock.memory.memdump" 0xffffffff81b3f200 2048
+        // bochs: writemem "/tmp/memblock.reserved.memdump" 0xffffffff81b3e9e0 2048
+        /*
+        $ ./print_memblock /tmp/memblock.memdump /tmp/memblock.memory.memdump /tmp/memblock.reserved.memdump
+        sizeof(struct memblock) = 64
+        sizeof memblock.memory/reserved = INIT_MEMBLOCK_REGIONS * sizeof(struct memblock_region) = 2048
+        memblock.current_limit  = 0x7ff0000
+        memblock.memory_size    = 0x7f7f000
+        memblock.memory.cnt     = 0x2
+        memblock.memory.max     = 0x80
+        memblock.memory.regions = 0xffffffff81b3f200
+        memblock.reserved.cnt     = 0x1a
+        memblock.reserved.max     = 0x80
+        memblock.reserved.regions = 0xffffffff81b3e9e0
+        --memory regions--
+        0: start=0x10000, end=0x9f000, size=0x8f000
+        1: start=0x100000, end=0x7ff0000, size=0x7ef0000
+        --reserved regions--
+        0: start=0x9a000, end=0x9f000, size=0x5000          // TRAMPOLINE
+        1: start=0x9fc00, end=0x100000, size=0x60400        // EBDA
+        2: start=0x1000000, end=0x1d04049, size=0xd04049    // Kernel TEXT DATA BSS and extend_brk 49 bytes
+        3: start=0x7200000, end=0x7400000, size=0x200000    // map_map[0] 第1个section的map
+        4: start=0x796e000, end=0x79eb000, size=0x7d000     // RAMDISK
+        5: start=0x7be6000, end=0x7be8000, size=0x2000      // 0xffea...的pud和pmd
+        6: start=0x7c00000, end=0x7c1c000, size=0x1c000     // static percpu area
+        7: start=0x7fb6000, end=0x7fee000, size=0x38000     // **pid_hash (0x7fb6000 0x1000)**
+                                                            // level2_fixmap_pgt[507] -> NEW PTE (0x7fb7000 0x1000) map __vsyscall_0
+                                                            // ZONE_DMA32 wait_table (0x7fb8000 0x18000)
+                                                            // ZONE_DMA wait_table (0x7fd0000 0x18000)
+                                                            // node_data[0] pglist_data (0x7fe8000 0x5000)
+                                                            // THE PTE (0x7fed000 0x1000)
+        8: start=0x7fee640, end=0x7fee890, size=0x250       // dchunk (0x7fee640 0x80)
+                                                            // schunk (0x7fee6c0 0x80)
+                                                            // pcpu_slot (0x7fee740 0x150)
+        9: start=0x7fee8c0, end=0x7fee8c8, size=0x8         // pcpu_unit_offsets
+        10: start=0x7fee900, end=0x7fee904, size=0x4        // pcpu_unit_map
+        11: start=0x7fee940, end=0x7fee948, size=0x8        // pcpu_group_sizes
+        12: start=0x7fee980, end=0x7fee988, size=0x8        // pcpu_group_offsets
+        13: start=0x7fee9c0, end=0x7fee9d4, size=0x14        // static_command_line
+        14: start=0x7feea00, end=0x7feea14, size=0x14        // saved_command_line
+        15: start=0x7feea40, end=0x7feea60, size=0x20        // nosave_region
+        16: start=0x7feea80, end=0x7feeae8, size=0x68       // e820_saved firmware_map_entry
+        17: start=0x7feeb00, end=0x7feeb68, size=0x68       // e820_saved firmware_map_entry
+        18: start=0x7feeb80, end=0x7feebe8, size=0x68       // e820_saved firmware_map_entry
+        19: start=0x7feec00, end=0x7feec68, size=0x68       // e820_saved firmware_map_entry
+        20: start=0x7feec80, end=0x7feece8, size=0x68       // e820_saved firmware_map_entry
+        21: start=0x7feed00, end=0x7feed68, size=0x68       // e820_saved firmware_map_entry
+        22: start=0x7feed80, end=0x7feef08, size=0x188      // e820_res
+        23: start=0x7feef40, end=0x7feef83, size=0x43       // ioapic_resources
+        24: start=0x7feefc0, end=0x7feefd8, size=0x18       // 第1个section的usemap
+        25: start=0x7fef000, end=0x7ff0000, size=0x1000     // mem_section[0]
+        */
+        early_node_map 里的两个 active_region 是
+        /*
+            0x10 - 0x9f
+            0x100 - 0x7ff0
+        */
+        memblock.reserved.cnt = 0x1a = 26
+        count_early_node_map(0) = 2
+        count = (26 + 2) * 2 = 28 * 2 = 56
+        /*
+            struct range {
+                u64 start;
+                u64 end;
+            }
+        */
+        在 memblock 里找一块内存, 大小为 54 * sizeof (struct range) = 54 * 16 = 0x380
+        range = 0x7fee2c0
+        然后计算下可用的RAM块都有哪些,保存到range里:
+        /*
+            start       end
+            0x10    -   0x9a    // 9a   - 9f        TRAMPOLINE
+            0x100   -   0x1000  // 1000 - 1d05      Kernel TEXT DATA BSS and extend_brk 49 bytes
+            0x1d05  -   0x7200  // 7200 - 7400      map_map[0] 第1个section的map
+            0x7400  -   0x796e  // 796e - 79eb      RAMDISK
+            0x79eb  -   0x7be6  // 7be6 - 7be8      0xffea...的pud和pmd
+            0x7be8  -   0x7c00  // 7c00 - 7c1c      static percpu area
+            0x7c1c  -   0x7fb6  // 后边的内存即使有空隙也不够1个page
+         */
+         __free_pages_memory(start, end);
+            // 到这里一定得再看看 understanding kernel 的 The Buddy System Algorithm, 这个算法有两个关键点:
+            // 1) All free page frames are grouped into 11 lists of blocks that contain groups of
+            //      1, 2, 4, 8, 16, 32, 64, 128, 256, 512, and 1024
+            //    contiguous page frames, respectively.
+            // 2) The physical address of the first page frame of a block is a multiple of the group size
+            // 现在给一个range,要把这个range里的page加到相应的list里,有很多种办法,
+            // 比如一个page接一个page的添加,然后按照Buddy System Algorithm一点点的向上合并,但这个办法有点不够高效
+            // 还可以选择一个中间值,比如64,然后每次64个page的添加,但为了满足算法第2点的要求,range里第一个64个page块的开始点有要求,必须是64的倍数
+            // 这就需要掐头去尾(如下图),头尾部分一个page一个page的添加,当中部分每64个page的添加
+
+            start        64*n                                64*m                end
+            |     part1    |           part2                   |    part3         |
+
+            // 具体的添加逻辑就是 __free_pages_bootmem(page, order)
+            // order = 0 就是添加头尾
+            // order = 6 就是添加当中部分
+            // 但有一点不明白的就是, zone.free_area[MAX_ORDER] 的 MAX_ORDER 是定义死的 11, 这里选取中间值时是根据BITS_PER_LONG选取的,这是怎么个关系?
+
+            order = ilog2(BITS_PER_LONG) = ilog2(64) = 6
+            part1和part3部分的每个page __free_pages_bootmem(page, 0)
+            part2部分每64个page,      __free_pages_bootmem(page, 6)
+
+            __free_pages_bootmem(page, order)
+            // __free_pages_bootmem里不管order值是几,先把指定的page(s)清除掉reserved标记
+            // 前边setup_arch里free_area_init_core时,memmap_init把每个page都标记为reserved了
+            // 然后调用 set_page_count(page, 0)把page->_count设为0,再调用 set_page_refcounted(page)把page->_count设为1
+            // set_page_refcounted的注释里说 Turn a non-refcounted page (->_count == 0) into refcounted with a count of one.
+            // 还是不明白把page->_count设为1的用处
+            // 然后关键的逻辑就在 __free_pages(page, order) 里了. __free_page(page) => __free_pages(page, 0)
+            __free_pages(page, order)
+            // 如果put_page_testzero(page)返回true,那么才会处理这个page(s)
+            // put_page_testzero的注释写的很清楚 Drop a ref, return true if the refcount fell to zero (the page has no users)
+            // 前边我们知道 page->_count 被 set_page_refcounted 设为1了,所以现在这个函数返回值都是true
+            // 如果order=0,则 free_hot_cold_page(page, 0) => free hot page, 否则 __free_pages_ok(page, order)
+            // 关于hot code,可以看 understanding kernel 的 The Per-CPU Page Frame Cache 部分
+            // 在 memap_init 时, megratetype被设成了MIGRATE_MOVABLE
+            // zone->pageset 在 free_area_init_core 的 zone_pcp_init 里被指向了 boot_pageset, 而boot_pageset是个 per cpu 变量,
+            // setup_per_cpu_areas之后,每个cpu都有一个自己的boot_pageset,地址是%gs:boot_pageset,对我们的情况,就是0x7c10900
+            // 在bochs里查看内存知道,当前pcp->high = 0, pcp->batch = 1,
+            // 所以每向pcp里加入一个page,就会调用 free_pcppages_bulk => free_one_page 把这个page加到free_area里
+            // __free_pages_ok直接调用free_one_page把pages(对目前的情况是64个page)加到free_area里
+            // free_one_page的逻辑如 understanding kernel 里所述,就是一点点向上合并的
+
+            // 下边我们根据算法描述,用php写一个小程序,把每个range分成上述3部分,然后加到free_area里
+            // 由于free_area是在zone里的,range2freearea.php每次只计算一个zone的range
+            php range2freearea.php dma-ranges.php
+            php range2freearea.php dma32-ranges.php
+            // 怎么能打印出node_data.zone.free_area[MAX_ORDER].free_list[MIGRATE_PCPTYPES]里对应的pfn呢?
+            struct free_area {
+                struct list_head free_list[MIGRATE_PCPTYPES];
+                unsigned long nr_free;
+            }
+            如果list_head指向自身,那么这个free_list是空的,但是我们自己写程序的话,mmap后,指的地址肯定和bochs里的不一样了,
+            这就判断不出来free_list是空的还是仅有一项(free_list是一个循环链接)
+            我们可以这样判断,struct page的地址是0xffffea....这样的,如果free_list指向的地址是这个范围的,那么就不是空的,
+            如果指向的地址是0xffff88...这样的,就是空的
+            然后,sizeof(struct page) = 0x38, 而page->lru在struct page的最后,那么 ((&page->lru - 0x28) - 0xffffea00...) / 0x38 就是 pfn 了
+            // bochs: writemem "/tmp/node_data.memdump" 0xffff880007fe8000 0x5000
+            // bochs: writemem "/tmp/section_mem_map.memdump" 0xffff880007200000 0x200000
+            ./print_node_data /tmp/node_data.memdump /tmp/section_mem_map.memdump
+
+totalram_pages = 0xf8a + 0x6016 = 0x6fa0
+absent_pages   = 0x10 + (0x100 - 0x9f) = 0x71
+reservedpages  = 0x7ff0 - 0x6fa0 - 0x71 = 0xfdf
+
+after_bootmem = 1
+
+codesize = 0x15e48dc - 0x1000000 = 0x5e48dc
+datasize = 0x1acc280 - 0x15e48dc = 0x4e79a4
+initsize = 0x1ba8000 - 0x1ace000 = 0xda000
+
+/* Register memory areas for /proc/kcore */
+kclist_add(&kcore_vsyscall, (void *)VSYSCALL_START, VSYSCALL_END - VSYSCALL_START, KCORE_OTHER);
+                            0xFFFFFFFFFF600000      0x800000
+
+syslog打印出 Memory: (0x6fa0*4=0x1be80)k/(0x7ff0*4=0x1ffc0)k available (
+                        (0x5e48dc>>10=0x1792)k kernel code,
+                        (0x71*4=0x1c4)k absent,
+                        (0xfdf*4=0x3f7c)k reserved,
+                        (0x4e79a4>>10=139e)k data,
+                        (0xda000>>10=368)k init
+                    )
+</code></pre>
+<br>
+
+
+<code>kmem_cache_init();</code> .config里定义了 CONFIG_SLUB=y, 所以这个函数我们看slub.c里的.
+<pre><code class="language-c">struct kmem_cache {
+    //...
+    struct kmem_cache_node *node[MAX_NUMNODES]; // MAX_NUMNODES = 64, 显然是要为每个node准备一个kmem_cache_node
+};
+
+kmem_size = offsetof(struct kmem_cache, node) // offsetof的意思是kmem_cache从开头到node(不包括node)占有多少内存
+            + nr_node_ids * sizeof(struct kmem_cache_node *); // 虽然struct kmem_cache里定义的是MAX_NUMNODES,但真的要分配内存的时候
+                                                              // 实际有几个node才分配几个,并不是真的分配MAX_NUMNODES
+                                                              // x86_64只有一个dummy node.
+          = 0xc0 + 1 * 8 = 0xc8
+kmalloc_size = ALIGN(kmem_size, cache_line_size()) = ALIGN(0xc8, x86_cache_alignment=0x40) = 0x100
+order = get_order(2 * kmalloc_size) = get_order(0x200) = 0
+kmem_cache = (void *)__get_free_pages(GFP_NOWAIT, order); // kmem_cache 是全局变量 static struct kmem_cache *kmem_cache;
+
+// 上边这段代码get了1个page,用来保存两个kmem_cache, bochs追踪可知拿到的这个page是0x7400. 
+// (这就让人搞不懂了,这里明明只需要1个page就够了,为什么分配的时候把0x7400这个4M的大块内存给拆了呢?)
+
+kmem_cache_node = (void *)kmem_cache + kmalloc_size; // kmem_cache_node 也是个全局变量 static struct kmem_cache *kmem_cache_node;
+// 分配的这1个page,前0x100字节是 kmem_cache, 接下来的 0x100字节是 kmem_cache_node
+
+kmem_cache_open(kmem_cache_node, "kmem_cache_node",
+	sizeof(struct kmem_cache_node),
+	0, SLAB_HWCACHE_ALIGN | SLAB_PANIC, NULL);
+/*
+static int kmem_cache_open(struct kmem_cache *s, const char *name,
+    size_t size,
+    size_t align, unsigned long flags, void (*ctor)(void *))
+*/
+    s->name    = "kmem_cache_node";
+    s->ctor    = NULL;
+    s->objsize = sizeof(struct kmem_cache_node) = 0x40;
+    s->align   = 0;
+    s->flags   = kmem_cache_flags(size, flags, name, ctor) = SLAB_HWCACHE_ALIGN | SLAB_PANIC; // 如果没开slub_debug的话,这个函数简单的返回flags
+    s->reserved = 0;
+    calculate_sizes(s, -1);
+        struct kmem_cache_node {
+            spinlock_t list_lock;
+            unsigned long nr_partial;
+            struct list_head partial;
+            atomic_long_t nr_slabs;
+            atomic_long_t total_objects;
+            struct list_head full;
+        }; // size = 64 = 0x40
+        s->inuse = size = 0x40;
+    // bochs: writemem "/tmp/kmem_cache.memdump" 0xFFFF880007400100 0xc8
+    /* ./print_kmem_cache /tmp/kmem_cache.memdump
+        sizeof(struct kmem_cache) = 0xc8
+        size    = 0x40
+        objsize = 0x40
+        offset  = 0
+        inuse   = 0x40
+        align   = 0x40
+        oo      = 0x40
+        min     = 0x40
+        max     = 0x40
+    */
+    // 有了 print_kmem_cache, calculate_sizes 好理解多了,看起来是这样子的:
+    // 一个object除了其自身实际大小(objsize, inuse)外,还可以嵌入其它信息,所以它最终占有的大小(size)可能要比自身大
+    // 根据最终确定的size大小,可以计算出这个object的slab为多大最为合适,然后也就可以计算出这个slab可以放多少个object了
+    // 比如struct kmem_cache的大小是0x40,它没有嵌入其它额外信息,也没有reserved,那么它的objsize = inuse = size = 0x40,它的slab大小为1个page, order = 0,可以放下0x40个struct kmem_cache
+    // oo,min,max是struct kmem_cache_order_objects类型的,如其名字所示,其实它们不是0x40,而是0x0040,0-15位保存的是objects,16-31位保存的是order
+    // @see http://lwn.net/Articles/229984/ 这篇很短的文章把slub介绍的挺好的,不过和当前的代码比起来还是对不上了
+    s->min_partial = 6 // 不知道做什么用的
+    s->refcount = 1
+    s->remote_node_defrag_ratio = 1000;
+    init_kmem_cache_nodes(s);
+        early_kmem_cache_node_alloc();
+            page = new_slab(); // 前边我们把slab的大小(order)嵌入了kmem_cache.oo的16-31位,这里取出来,根据order分配page,如果失败,则按min的分配
+                               // 分配成功后,struct page->objects = oo_objects(oo); oo的0-15位保存着objects的数量
+                               // struct kmem_cache描述了这个slab的详细构造,这样的slab在一个node里有多少个,总共有多少个objects,用struct kmem_cache_node记录
+                               // 每new出一个slab,对应kmem_cache_node的nr_slabs++, total_objects+=objects
+                               // 这就相当于面向对象里的 class 和 instance 的关系, struct kmem_cache相当于class,给出类的定义,每一个slab相当于instance
+                               // 不过当前的情况是,还没有kmem_cache_node, kmem_cache.node=NULL,所以这次的记数操作当前做不了,后边会补上
+                               // page->slab = s;
+                               // page->flags |= 1 << PG_slab;
+                               // objects之间在object.offset处当成指针串联起来
+                               // page->free_list = start;
+                               // page->inuse = 0;
+                               OK, 到此,一个用作slab的page算是清楚了
+                               struct page {
+                                    unsigned long flags; // PG_slab 标记表明这个page用作了slab
+                                    atomic_t _count;
+                                    struct {
+                                        u16 inuse;      // inuse表明有多少个object已经分配出去在用了
+                                        u16 objects;    // objects表示这个slab总共有多少个object
+                                    };
+                                    struct kmem_cache *slab;    // 指向 kmem_cache, 也就是这个slab的定义
+                                    void *freelist;             // 指向slab里第一个free_list
+                                    struct list_head lru;
+                                };
+            struct kmem_cache_node *n = page->freelist;
+            page->freelist = get_freepointer(kmem_cache_node, n);
+            page->inuse++;
+            kmem_cache_node->node[node] = n;
+            init_kmem_cache_node(n, kmem_cache_node);
+            inc_slabs_node(kmem_cache_node, node, page->objects);
+            // 前边new_slab分配了1个page,0x40个struct kmem_cache_node object,这里取一个object给kmem_cache_node用,并且补上nr_slabs total_objects记数
+            add_partial(n, page, 0);
+            // 由于前边用一个object,这个slab成为partial了,加到partial list里
+    alloc_kmem_cache_cpus();
+        s->cpu_slab = __alloc_percpu(sizeof(struct kmem_cache_cpu), 2 * sizeof(void *)); // => pcpu_alloc(size, align, reserved=false);
+        init_kmem_cache_cpus(s); // kmem_cache_cpu.tid = cpu number;
+
+    // OK, 到此我们有了第一个slab,这个slab里的object都是struct kmem_cache_node
+
+slab_state = PARTIAL; // slab的状态分为4个, static enum {
+                      //      DOWN,       /* Nodes slab functionality available */
+                      //      PARTIAL,    /* Kmem_cache_node works */
+                      //      UP,         /* Everything works but does not show up in sysfs */
+                      //      SYSFS       /* Sysfs up */
+                      // }, 经过上边的kmem_cache_open后,我们从DOWN进入到了PARTIAL状态
+
+temp_kmem_cache = kmem_cache;
+kmem_cache_open(kmem_cache, "kmem_cache", kmem_size,
+	0, SLAB_HWCACHE_ALIGN | SLAB_PANIC, NULL);
+kmem_cache = kmem_cache_alloc(kmem_cache, GFP_NOWAIT);
+memcpy(kmem_cache, temp_kmem_cache, kmem_size);
+// 可以预见,struct kmem_cache这个object需求量会很大,因为每个类型的slab都需要一个对应的kmem_cache,那现在就先open出来一个kmem_cache的slab
+// 第一步还是要构造slab的描述信息,包括object的大小等等
+// 然后在init_kmem_cache_nodes()时,现在slab_state已经不是DOWN了,直接从上边分配好的slab里取一个struct kmem_cache_node object就好了
+// 把取出来的kmem_cache_node设到kmem_cache里,然后初始化这个kmem_cache_node
+// 再alloc_kmem_cache_cpus(), 其实这个函数做的事挺简单的,就是从 dchunk 里给每个cpu alloc出一个struct kmem_cache_cpu,并把对应的cpu number设上
+
+第二次调用kmem_cache_open,让我们基本上理解了slub的设计,这里小结一下:
+    假设我们需要一个objectA,slub会分配出一块内存slabA-1,这块内存看作objectA[NR].如果这NR个objectA用完了,slub再分配一块内存slabA-2,还看作objectA[NR].如此类推.
+    那现在问题来了,每次分配的时候这块内存应该是多大呢?这个大小的计算就是上边的 calculate_sizes() 做的事,出于其它各种现在还不明白的需求,objectA除了自身以外,
+    还需要一些空间来存储meta_info,最终 calculate_sizes() 计算出每次分配时应分配几个page,以及每次分配能分配出来多少个object,也就是NR等于几.
+    这些计算出来的信息需要一个数据结构存储,这个数据结构就是 struct kmem_cache.
+    还有一个问题是,我们会分配多次,这样就会有很多个slabA-1,slabA-2,...,slabA-N,那到底有多个少,哪些slab里还有free的object可用,这也需要一个数据结构来存储.
+    这个数据结构就是 struct kmem_cache_node.
+    OK, 理一下依赖关系, struct kmem_cache 用来描述slab的静态信息, struct kmem_cache_node 用来记录slab的实际使用情况.
+    显然, kmem_cache 描述的slab会有很多, 每个类型的slab都需要一个 kmem_cache_node, 所以我们先要准备一大堆的 kmem_cache_node 供后边使用.
+    这就是前边第一次调用kmem_cache_open做的事. 它分配一块内存,用作struct kmem_cache_node[NR],然后拿出其中一个,记录自身的实际使用情况.(有点鸡生蛋,蛋生鸡的意思)
+    一旦kmem_cache_node ready之后,再次调用kmem_cache_open就简单了,一样的调用 calculate_sizes() 计算出来应该分配多大内存,以及其它信息保存到kmem_cache里,再取一个kmem_cache_node用来记录实际使用情况.这就好了.
+    真正的alloc内存会等到实际需要的时候才alloc.具体逻辑在slab_alloc()函数里.
+    slab_alloc()先检查kmem_cache.cpu_slab->freelist是否指向了可用了object.我们知道alloc_kmem_cache_cpus()里仅仅给每个cpu分配了一个 kmem_cache_cpu 的数据结构,并没有初始化 freelist.
+    先说简单的情况,如果freelist指向了可用的object,那就直接返回就完了.否则,调用 __slab_alloc() 函数获取object并初始化cpu_slab.freelist.
+    __slab_alloc()的注释说的也很清楚,kmem_cache_node记录着可用的partial slab,如果有,把这个slab设成cpu_slab并返回object.
+    如果没有partial_slab,那就要new_slab,调用page allocator根据kmem_cache的描述分配新的内存,初始化page,objects,并把这个新的slab加到kmem_cache_node里去,然后把它设为cpu_slab并返回object.
+
+    struct kmem_cache_node {
+        spinlock_t list_lock;
+        unsigned long nr_partial;       // 有多少个partial的slab
+        struct list_head partial;       // 把所有partial的slab连起来
+        atomic_long_t nr_slabs;         // 一共有多少个slab
+        atomic_long_t total_objects;    // 所有slab里总共有多少objects
+        struct list_head full;
+    };
+
+    struct kmem_cache {
+        struct kmem_cache_cpu __percpu *cpu_slab;
+        unsigned long flags;
+        unsigned long min_partial;
+        int size;                   /* The size of an object including meta data */
+        int objsize;                /* The size of an object without meta data */
+        int offset;                 /* Free pointer offset. */
+        struct kmem_cache_order_objects oo; // oo其实就是个unsigned long,不过当前只用到了低32位.0-15记录着分配多少objects合适,16-31位记录着分配page时的order
+        struct kmem_cache_order_objects max;
+        struct kmem_cache_order_objects min;
+        gfp_t allocflags;
+        int refcount;
+        void (*ctor)(void *);   // slab分配出来后,如果需要,可以对里边的每个object做初始化
+        int inuse;              /* Offset to metadata */
+        int align;
+        int reserved;           /* Reserved bytes at the end of slab */
+        const char *name;       /* Name (only for display!) */
+        struct list_head list;  /* List of slab caches */
+        struct kobject kobj;    /* For sysfs */
+        int remote_node_defrag_ratio;
+        struct kmem_cache_node *node[MAX_NUMNODES];
+    };
+
+// 继续看代码,第二次kmem_cache_open new了一个kmem_cache的slab,然后从中取一个,把当前的kmem_cache copy过去. 
+// 注意: 当前的kmem_cache是调用page allocator分配出来的, memcpy之后,新的kmem_cache是调用slub allocator分配出来的.
+// 同理, 把kmem_cache_node也用slub allocator分配的替换掉
+// 前边刚开始 new kmem_cache_node slab 时,从page allocator那里分配的page.slab指向了老的kmem_cache_node,现在要把它们更正过来.这就是kmem_cache_bootstrap_fixup(kmem_cache_node);做的事
+// 同理,新的kmem_cache alloc时把page.slab指向了老的,也需要fixup.
+// 此时,从page allocator那里分配出来的1个page就没用了,free掉
+
+// 然后调用 create_kmalloc_cache 创建了各种不同大小的 slab, 这个过程和第二次kmem_cache_open比较类似,区别在于在open之前要先从kmem_cache slab里取一个object出来计算好对应大小的 kmem_cache 描述
+
+slab_state = UP; // Everything works but does not show up in sysfs, kmalloc is ready
+
+// 前边创建不同大小的slab时,对应的kmem_cache.name固定为"kmalloc",现在内存分配方便了,把名字修正过来,简单的说,就是从slab里取出object,把正确的字符串copy过去,然后赋值给kmem_cache.name
+
+// 最后,再单独为 dma create一系列不同大小的slab.
+
+// syslog里打印出 SLUB: Genslabs=%d, HWalign=%d, Order=%d-%d, MinObjects=%d, CPUs=%d, Nodes=%d
+
+// 从slab_caches这个list_head开始,可以找到所有不同大小的slab
+// static struct kmem_cache *kmalloc_dma_caches[SLUB_PAGE_SHIFT];
+// struct kmem_cache *kmalloc_caches[SLUB_PAGE_SHIFT];
+
+追踪bochs执行,再来过一遍:
+
+kmem_size = 0xc8, align过后kmalloc_size = 0x100, order = 0, 调用page_allocator分配一个page
+kmem_cache = 0x7400000;
+kmem_cache_node = kmem_cache + kmalloc_size = 0x7400000 + 0x100 = 0x7400100
+
+kmem_cache_open(kmem_cache_node, "kmem_cache_node") new 了一个 kmem_cache_node 的 slab
+// bochs: writemem "/tmp/kmem_cache.memdump" 0xFFFF880007400100 0xc8
+/* ./print_kmem_cache /tmp/kmem_cache.memdump
+    sizeof(struct kmem_cache) = 0xc8
+    cpu_slab = 0x16d00      // dchunk就是从 0x14d00(static) + 0x2000(reserved) = 0x16d00开始的
+    size = 0x40, objsize = 0x40, offset = 0, inuse = 0x40
+    oo = 0x40, order = 0, objects = 64
+    min = 0x40, order = 0, objects = 64
+    align = 0x40
+    reserved = 0
+    list.prev = (nil), list.next = (nil)
+    kmem_cache_node = 0xffff880007401000
+*/
+
+kmem_cache_open(kmem_cache, "kmem_cache") new 了一个 kmem_cache 的 slab
+// bochs: writemem "/tmp/kmem_cache.memdump" 0xFFFF880007400000 0xc8
+/* ./print_kmem_cache /tmp/kmem_cache.memdump
+    sizeof(struct kmem_cache) = 0xc8
+    cpu_slab = 0x16d20
+    size = 0x100, objsize = 0xc8, offset = 0, inuse = 0xc8
+    oo = 0x10, order = 0, objects = 16
+    min = 0x10, order = 0, objects = 16
+    align = 0x40
+    reserved = 0
+    list.prev = (nil), list.next = (nil)
+    kmem_cache_node = 0xffff880007401040
+*/
+kmem_cache = kmem_cache_alloc(kmem_cache, GFP_NOWAIT);  // slub分配的kmem_cache = 0x7402000, bochs里查看内存会发现 0x7402000 处的值是 0x7402100
+memcpy(kmem_cache, temp_kmem_cache, kmem_size);         // kmem_cache的size=0x100,offset=0,所以每个object的开头指向下一个free的object,就是0x7402100了
+
+kmem_cache_node = kmem_cache_alloc(kmem_cache, GFP_NOWAIT); // kmem_cache_node = 0x7402100
+memcpy(kmem_cache_node, temp_kmem_cache_node, kmem_size);
+
+// 每个slab对应的kmem_cache.node记录着有多少个slab,node.partial这个链表链接着partial slab对应的page,page.freelist指向slab里第一个free object,page.slab反过来指向kmem_cache
+// 一个slab一旦被设为cpu_slab,它就不是partial了,前边kmem_cache_open(kmem_cache, "kmem_cache")过程中,alloc kmem_cache_node时把 kmem_cache_node slab给设成cpu_slab了,所以它已经不在partial里了
+kmem_cache_bootstrap_fixup(kmem_cache_node); // 如上所述,kmem_cache_node->node->partial是空的,所以这个函数什么也没做
+kmem_cache_bootstrap_fixup(kmem_cache); // 同理,kmem_cache->node->partial也是空的,这个函数也什么都没做
+
+free_pages((unsigned long)temp_kmem_cache, order); // 现在kmem_cache和kmem_cache_node用的都是slub分配的了,free掉刚开始从page allocator那里获取的1个apge
+
+// KMALLOC_MIN_SIZE = 8;
+kmalloc_caches[1] = create_kmalloc_cache("kmalloc-96", 96, 0) = 0x7402200; // 由于 KMALLOC_MIN_SIZE 是#define的,前边的一堆代码在编译时就能判断出来不相等,所以直接就丢掉了
+kmalloc_caches[2] = create_kmalloc_cache("kmalloc-192", 192, 0) = 0x7402300;
+// KMALLOC_SHIFT_LOW = 3; SLUB_PAGE_SHIFT = PAGE_SHIFT + 2 = 12 + 2 = 14;
+kmalloc_caches[3] = create_kmalloc_cache("kmalloc", 8, 0) = 0x7402400;
+kmalloc_caches[4] = create_kmalloc_cache("kmalloc", 16, 0) = 0x7402500;
+kmalloc_caches[5] = create_kmalloc_cache("kmalloc", 32, 0) = 0x7402600;
+...
+kmalloc_caches[13] = create_kmalloc_cache("kmalloc", 0x2000, 0) = 0x7402e00; // 到此,kmem_cache的第一个slab里16个object已经用了15个了
+
+slab_state = UP;
+
+上边3-13的kmalloc name都设成了"kmalloc",现在更正过来, 虽然1和2的name是对了,也使用slub分配的内存存储name
+这些name当中,最短的是"kmalloc-8"=9个字符,最长的是"kmalloc-8192"=12个字符,所以这些name都使用kmalloc-16的slab,这个slab对应的内存是0x7400000,
+bochs里查看内存就能看到这些name的字符串
+
+.config里定义了 CONFIG_ZONE_DMA=y
+kmalloc_dma_caches[1] = create_kmalloc_cache("dma-kmalloc-96", 96, SLAB_CACHE_DMA) = 0x7402f00; // 到此,kmem_cache的第一个slab里16个object已经用完了
+kmalloc_dma_caches[2] = create_kmalloc_cache("dma-kmalloc-192", 192, SLAB_CACHE_DMA) = 0x7403000; // 再new一个slab
+kmalloc_dma_caches[3] = create_kmalloc_cache("dma-kmalloc-8", 8, SLAB_CACHE_DMA) = 0x7403100;
+kmalloc_dma_caches[4] = create_kmalloc_cache("dma-kmalloc-16", 16, SLAB_CACHE_DMA) = 0x7403200;
+...
+kmalloc_dma_caches[13] = create_kmalloc_cache("dma-kmalloc-8192", 0x2000, SLAB_CACHE_DMA) = 0x7403b00;
+
+syslog里打印出 SLUB: Genslabs=15, HWalign=64, Order=0-3, MinObjects=0, CPUs=1, Nodes=1
+
+// 这里值得一说的是kmalloc函数的逻辑,前边我们也看到了,最大的slab是8192个字节,也就是0x2000=8K,如果申请的内存大于8K,那就不能用slab了
+static __always_inline void *kmalloc(size_t size, gfp_t flags)
+{
+	if (__builtin_constant_p(size)) {
+		if (size > SLUB_MAX_SIZE)
+			return kmalloc_large(size, flags); // => 直接从page allocator那里分配
+
+		if (!(flags & SLUB_DMA)) {
+			struct kmem_cache *s = kmalloc_slab(size); // 找到合适size的slab
+
+			if (!s)
+				return ZERO_SIZE_PTR;
+
+			return kmem_cache_alloc_trace(s, flags, size); // => 从slab中取object返回
+		}
+	}
+	return __kmalloc(size, flags); // => get_slab(size, flags) 如果 SLUB_DMA, 则从 kmalloc_dma_caches 里分配
+}
+</code></pre>
+<br>
+
+<code>percpu_init_late();</code> 这个函数的注释里写的很清楚, dchunk和reserved chunk用的map在initdata里,现在slab已经好了,把这个map给重新分配一下. 难道后边initdata会free掉?好像在哪里见到过这样的说法.<br><br>
+
+<code>pgtable_cache_init();</code> 空函数,不产生任何实际指令. <br><br>
+
+<code>vmalloc_init();</code> 由于vmlist = NULL, 所以这个函数实际上没做什么事.<br>
+初始化了 percpu vmap_block_queue, 但这个有什么用,现在还不知道.<br>
+vmap_initialized = true;<br>
+understanding kernel里有对vmalloc的介绍,大意就是通过pagetable把不连续的内存map成连续的.这个地址范围是:<br>
+<pre><code class="language-c">#define VMALLOC_START    _AC(0xffffc90000000000, UL)
+#define VMALLOC_END      _AC(0xffffe8ffffffffff, UL)
+#define VMEMMAP_START    _AC(0xffffea0000000000, UL) // 这个地址范围我们已经很熟悉了,每个page对应的struct page就在这个范围里
+#define MODULES_VADDR    _AC(0xffffffffa0000000, UL)
+#define MODULES_END      _AC(0xffffffffff000000, UL)
+</code></pre>
+
+</div>
+<script src="prism.js"></script>
+</body>
+</html>
