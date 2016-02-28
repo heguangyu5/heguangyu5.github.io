@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">start_kernel after mm_init</h1>
+
+<code>sched_init();</code> 先大概过一遍 Linux Kernel Development 的第4章 Process Scheduling. 关键点记录一下:<br><br>
+<p>
+    <b>Scheduler Classes</b><br>
+    The Linux scheduler is modular, enabling different algorithms to schedule different types of processes.<br>
+    This modularity is called scheduler classes. Scheduler classes enable different, pluggable algorithms to coexist, scheduling their own types of processes.<br>
+    Each scheduler class has a priority.<br>
+    The base scheduler code, which is defined in kernel/sched.c, iterates over each scheduler class in order of priority.<br>
+    The highest priority scheduler class that has a runnable process wins, selecting who runs next.<br>
+    The Completely Fair Scheduler (CFS) is the registered scheduler class for normal processes, called SCHED_NORMAL in Linux (and SCHED_OTHER in POSIX).<br>
+    <b>Time Accounting</b><br>
+    CFS uses the <code>struct sched_entity</code> to keep track of process accounting. <br>
+    The scheduler entity structure is embedded in the process descriptor, <code>struct task_struct</code>, as a member variable named <code>se</code>.<br>
+    CFS uses a red-black tree to manage the list of runnable processes and efficiently find the process with the smallest vruntime.<br>
+    Given this tree, the process that CFS wants to run next, which is the process with the smallest <code>vruntime</code>, is the leftmost node in the tree.<br>
+    <b>The Scheduler Entry Point</b><br>
+    The main entry point into the process schedule is the function <code>schedule()</code>, defined in kernel/sched.c.<br>
+    This is the function that the rest of the kernel uses to invoke the process scheduler, deciding which process to run and then running it. <br>
+    schedule() is generic with respect to scheduler classes.That is, it finds the highest priority scheduler class with a runnable process and asks it what to run next.
+</p>
+
+.config里定义了 CONFIG_FAIR_GROUP_SCHED=y, CONFIG_RT_GROUP_SCHED=y, 但是没有定义 CONFIG_CPUMASK_OFFSTACK
+<pre><code class="language-c"> // Default task group. Every task in system belong to this group at bootup.
+struct task_group root_task_group {
+    // ...
+    /* schedulable entities of this group on each cpu */
+    struct sched_entity **se;
+    /* runqueue "owned" by this group on each cpu */
+    struct cfs_rq **cfs_rq;
+
+    struct sched_rt_entity **rt_se;
+    struct rt_rq **rt_rq;
+    // ...
+};
+
+// sched_init的一开始,先调用kzalloc分配一块内存,分别用作
+struct sched_entity *se[nr_cpu_ids];
+struct cfs_rq *cfs_rq[nr_cpu_ids];
+struct sched_rt_entity *rt_se[nr_cpu_ids];
+struct rt_rq *rq_rq[nr_cpu_ids];
+// 对我们单核来说,其实就是4个指针,32个字节.
+
+init_defrootdomain(); // 不知道干什么用的,就是初始化了 def_root_domain 变量,是关于cpu的.
+
+init_rt_bandwidth(&def_rt_bandwidth, global_rt_period(), global_rt_runtime());
+// global_rt_period() = sysctl_sched_rt_period * NSEC_PER_USEC = 1000000 * 1000 = 1 000 000 000 纳秒 = 1s;
+// global_rt_runtime() = sysctl_sched_rt_runtime * NSEC_PER_USEC = 950000 * 1000 = 950 000 000 纳秒 = 950ms;
+// ktime_t 其实就是 s64;
+struct rt_bandwidth def_rt_bandwidth = {
+	raw_spinlock_t  rt_runtime_lock;
+	ktime_t         rt_period;          // = 1s
+	u64             rt_runtime;         // = 950ms
+	struct hrtimer  rt_period_timer;    // .function = sched_rt_period_timer
+};
+// 不太清楚这个 rt_bandwidth 是干什么用的, root_task_group 里也有一个 rt_bandwidth, 一样做好初始化
+
+// .config里定义了 CONFIG_CGROUP_SCHED=y, 接下来把 root_task_group 加到 task_groups 链表里, cgroup 还很不了解,跳过去
+
+// This is the main, per-CPU runqueue data structure.
+struct rq {
+    unsigned long nr_running;
+    unsigned long cpu_load[CPU_LOAD_IDX_MAX];
+    unsigned long last_load_update_tick;
+    ...
+    struct cfs_rq cfs;
+    struct rt_rq rt;
+    ...
+    struct task_struct *curr, *idle, *stop;
+    ...
+    // 这是一个相当大的struct呀!!!
+}
+static DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues); // System.map 0x14040 runqueues
+
+接下来一个for_each_possible_cpu, 把每个cpu对应的struct rq做了初始化.
+// foreach的过程中用到了jiffies,这个变量到底怎么定义出来的让人搞不懂. 不过最终看System.map查到其地址,再通过bochs查看其值为 0xfffedb08
+// 正好是 (unsigned long)(unsigned int)(-300 * HZ=CONFIG_HZ=250) = INITIAL_JIFFIES = jiffies_64 (defined in kernel/timer.c#0055)
+struct rq里的东西都还不知道怎么个用处,不过 cfs_rq 和 rt_rq 是我们所关注的,它们在这个foreach里都初始化了,这两个结构里分别都包含了struct rq *rq, 又指回来了
+所以从rq能找到cfs_rq和rt_rq,从cfs_rq和rt_rq也能找到rq.
+
+set_load_weight(&init_task);
+    init_task->se.load.weight = prio_to_weight[p->static_prio - MAX_RT_PRIO];
+                              = prio_to_weight[(140-20) - 100]
+                              = prio_to_weight[20]
+    init_task->se.load.inv_weight = prio_to_wmult[p->static_prio - MAX_RT_PRIO];
+                                  = prio_to_wmult[20]
+    // @see include/linux/sched.h#1548, 这段注释写的很清楚:
+    // 一个进程的priority从0-139,rt priority从0-99,SCHED_NORMAL/SCHED_BATCH tasks的priority从100-139
+    // priority值越低,优先级越高,所以rt的高于SCHED_NORMAL/SCHED_BATCH
+    // prio_to_weight 就是一个整数数组, 里边共40个整数, 从0-39一个接一个递减25%. init_task的weight处在正当中
+
+#define current get_current()
+static __always_inline struct task_struct *get_current(void)
+{
+    return percpu_read_stable(current_task);
+}
+DECLARE_PER_CPU(struct task_struct *, current_task);
+
+// arch/x86/kernel/cpu/common.c#1017, System.map current_task = 0xcd00, 0x7c00000 + 0xcd00 = 0x7c0cd00 = 0x1a0b020 = &init_task
+DEFINE_PER_CPU(struct task_struct *, current_task) ____cacheline_aligned = &init_task;
+DEFINE_PER_CPU(unsigned long, kernel_stack) = (unsigned long)&init_thread_union - KERNEL_STACK_OFFSET + THREAD_SIZE;
+
+// arch/x86/kernel/init_task.c#0023
+union thread_union init_thread_union __init_task_data = { INIT_THREAD_INFO(init_task) };
+
+union thread_union {
+    struct thread_info thread_info;
+    unsigned long stack[THREAD_SIZE/sizeof(long)];
+};
+
+THREAD_SIZE = 8K = 1 &lt;&lt; 13
+%rsp & 0xffffe000 = thread_info, 去掉低13位就得到thread_info的地址了
+ ___________
+|           | <- stack
+|           |
+|           | <- %rsp
+|           |
+|           |
+|___________|
+|___________| <- thread_info
+
+
+init_idle(current, smp_processor_id());
+    __sched_fork(idle); // Perform scheduler related setup for a newly forked process. 其实就是初始化task_struct里的sched_entity.
+                        // se.vruntime = 0
+    idle->state = TASK_RUNNING;
+    idle->se.exec_start = sched_clock();
+    rq->curr = rq->idle = idle; // 这一句很重要,前边的foreach我们初始化了每个cpu的runqueue,这里这个runqueue的curr,idle有值了,指向init_task
+    // .config 里没有定义 CONFIG_PREEMPT
+    task_thread_info(idle)->preempt_count = 0;
+    idle->sched_class = &idle_sched_class;
+
+current->sched_class = &fair_sched_class; // 上边init_idle里把sched_class设为idle,这里又改为fair
+
+scheduler_running = 1;
+</code></pre>
+
+总结一下, sched_init() 初始化了每个cpu的runqueue, 并且将init_task设为rq.curr,并设其状态为TASK_RUNNING. <br>
+sched_classes: stop_sched_class -> rt_sched_class -> fair_sched_class -> idle_sched_class -> end. <br><br>
+
+<code>preempt_disable();</code> .config里没有定义 CONFIG_PREEMPT, 所以这个函数不产生实际指令.<br><br>
+
+<code>if (!irqs_disabled()) {local_irq_disable();}</code> 检查中断是否开启,如果开了,关掉
+<pre>irqs_disabled() 其实就是把 rFlags 保存到内存里, 然后看 IF 标志位是否为1, 如果是, 中断开启着呢,没有disable
+pushf;
+pop (memory)
+return !(memory & X86_EFLAGS_IF);
+
+local_irq_disable() 我们之前就有说过, 它其实就是 cli
+</pre>
+<br>
+
+<code>idr_init_cache();</code> 不清楚idr是什么东西,这个函数做的事挺简单的,就是创建了一个 idr_layer 类型的slab.<br>
+Linux Kernel Development里有讲idr,说idr其实就是个map,只不过map的是id和指针.不过这里是idr_layer,显然是更复杂了.<br><br>
+<code>perf_event_init();</code> 上边的idr和这个performance event好像有关系,先跳过去吧.<br><br>
+
+<code>rcu_init();</code>
+<pre><code class="language-c">
+// @see Documentation/RCU/whatisRCU.txt
+// @see What is RCU, Fundamentally?  http://lwn.net/Articles/262464/
+// @see UnderStandingKernel Kernel Synchronization
+// @see Linux Kernel Development Chapter 4 Process Scheduling Preemption and Context Switching
+要理解RCU,先从 concurrent read write 说起容易一些. UnderStandingKernel 的第5章 Kernel Synchronization 讲的非常好.
+
+我们在写多线程的程序时,遇到最初级的race condition就是: 
+有一个全局变量counter = 0, 线程1 counter++, 线程2 counter++, 如果没有使用 pthread_mutex_lock, 那么最终的counter值可不一定是2.
+
+这里之所以会最终值会不同,可能是由于线程调度引起的,具体分析见后边.在kernel里,有类似的事情:
+假设机器只有一个cpu:
+mov (memory) %rax; inc %rax; mov %rax (memory); // OR
+inc (memory)
+这样的指令始终都是没问题的,但是如果有两个或更多的cpu,那就有问题了:
+cpu1要read-inc-write, cpu2也要read-inc-write, 是有一个硬件设备叫 memory arbiter(a hardware circuit that serializes accesses to the RAM chips), 它能把指令给串行化,
+但这个memory arbiter可不会智能化到先把cpu1的执行完,再执行cpu2的. 
+要做到这一点, 首先,不能使用mov-inc-mov这三条指令的写法,要用inc这种写法,然后在 inc 前边加上 lock prefix (0xf0),
+这样,硬件设备会lock住memory bus,别的访问这个内存地址的指令就会block住,待这个指令执行完成后,才能访问.
+
+AMD Volume3: Lock Prefix
+
+The LOCK prefix causes certain kinds of memory read-modify-write instructions to occur atomically.
+The mechanism for doing so is implementation-dependent (for example, the mechanism may involve
+bus signaling or packet messaging between the processor and a memory controller). The prefix is
+intended to give the processor exclusive use of shared memory in a multiprocessor system.
+
+The LOCK prefix can only be used with forms of the following instructions that write a memory
+operand: ADC, ADD, AND, BTC, BTR, BTS, CMPXCHG, CMPXCHG8B, CMPXCHG16B, DEC,
+INC, NEG, NOT, OR, SBB, SUB, XADD, XCHG, and XOR. An invalid-opcode exception occurs if
+the LOCK prefix is used with any other instruction.
+
+回过头来说多线程的counter++问题,如果编译器把counter++编译成read-inc-write,那么即使只有一个cpu,结果也可能不是2.如果编译成inc,那么结果肯定是2.
+如果有多个cpu,此时即使是inc,结果也可能不是2. 随后写个程序验证下.
+
+接下来再说说编译器优化的问题:
+
+When using optimizing compilers, you should never take for granted that instruc-
+tions will be performed in the exact order in which they appear in the source code.
+For example, a compiler might reorder the assembly language instructions in such a
+way to optimize how registers are used. Moreover, modern CPUs usually execute
+several instructions in parallel and might reorder memory accesses. These kinds of
+reordering can greatly speed up the program.
+
+In Linux the barrier() macro, which expands into asm volatile("":::
+"memory"), acts as an optimization barrier. The asm instruction tells the compiler to
+insert an assembly language fragment (empty, in this case). The volatile keyword for-
+bids the compiler to reshuffle the asm instruction with the other instructions of the pro-
+gram. The memory keyword forces the compiler to assume that all memory locations in
+RAM have been changed by the assembly language instruction; therefore, the compiler
+cannot optimize the code by using the values of memory locations stored in CPU reg-
+isters before the asm instruction. Notice that the optimization barrier does not ensure
+that the executions of the assembly language instructions are not mixed by the CPU—
+this is a job for a memory barrier.
+
+A memory barrier primitive ensures that the operations placed before the primitive
+are finished before starting the operations placed after the primitive. Thus, a mem-
+ory barrier is like a firewall that cannot be passed by an assembly language instruc-
+tion.
+
+现在,我们可以说到 concurrent read write 了, 最简单的, 就是给公共资源加个lock, 不管是读还是写, 都先要取得lock, 然后才能操作.
+进一步的,对read most的场景,可以用read/write lock,多个reader,一个writer,writer要想写,必须等所有reader都结束了才行.
+RCU则更进一步,直接没有lock,那它怎么应对并发的读写呢?
+In contrast with conventional locking primitives that ensure mutual exclusion among concurrent threads regardless of whether they be
+readers or updaters, or with reader-writer locks that allow concurrent reads but not in the presence of updates, RCU supports
+concurrency between a single updater and multiple readers.
+关键在于这个updater不是直接修改公共资源,而是先将要修改的对象copy一份去做修改,修改好了之后,一个指针再替换回来,这样reader要么读到的是修改前的,要么读到的是修改后的,而不会读取到修改到一半的.
+这样看起来倒是挺容易的,难的在于指针替换之前所有reader读取的对象需要free掉,并且是要在所有reader都结束后才能free.
+怎么做到这一点呢?两种做法,一种是异步的,就是updater注册一个callack,在所有reader结束后调用这个callback. 一种是同步的,直接等所有reader结束,怎么等呢?
+把当前进程换到别的cpu上一遍,就好了.为什么这样就好了?
+要想把当前进程换到别的cpu上,必须调用scheduler来调度进程,scheduler调度进程分两种情况,一种是返回user-space时,一种是.config里启用了PREEMPTION.
+前者是通过约定来限制的,要使用RCU,你必须在返回user-space前结束掉reader;后者的话,只要当前有lock,就不会切换进程,当能切换进程时,lock已经没有了,也就是说reader已经结束了.
+明白了这点,就知道 http://lwn.net/Articles/262464/ 里边说 rcu_read_lock, rcu_read_unlock 在non-CONFIG_PREEMPT的kernel里不产生任何实际指令的意思了.
+因为non-CONFIG_PREEMPT的kernel里不会有第二种情况,只有第一种情况,第一种情况已经约定好了,所以当能调用scheduler换到另一个cpu上执行时,reader已经结束了,所有cpu换一遍下来,所有reader都结束了.
+</code></pre>
+kernel代码里的rcu和书里以及Documentation里的描述已经相差很多了.不过概念还是一致的,在rcu_init里,我们能看到open_softirq(RCU_SOFTIRQ, rcu_process_callbacks);
+这对应着上边updater注册一个callback,所有reader结束后调用这个callback. 具体怎么回事,当前了解到的知识还不足以弄清楚,后边再说吧.<br><br>
+
+<code>radix_tree_init();</code> 初始化了一个 radix_tree_node 类型的slab, radix_tree没自己写过，先跳过去.<br><br>
+
+</div>
+<script src="prism.js"></script>
+</body>
+</html>
