@@ -1,11 +1,16 @@
 #!/bin/bash
 
+# @see Documentation/devices.txt
+
 mkdir tmp_initrd_dir
 cd tmp_initrd_dir
 
 # 第一步
 mkdir -p bin dev usr/sbin usr/bin sbin
-sudo cp -a /dev/{console,tty,tty1} dev/
+cd dev
+sudo mknod tty c 5 0
+sudo mknod tty1 c 4 1
+cd ..
 cp ../busybox ./bin/
 sudo chroot ./ /bin/busybox --install -s
 echo "#!/bin/sh" > ./init
@@ -15,7 +20,11 @@ chmod +x ./init
 # mount-root
 if [ "$1" == "mount-root" ]
 then
-    sudo cp -a /dev/{tty0,sda,sda1} dev/
+    cd dev
+    sudo mknod tty0 c 4 0
+    sudo mknod sda b 8 0
+    sudo mknod sda1 b 8 1
+    cd ..
     mkdir -p mnt/root proc sys
     echo "#!/bin/sh" > ./init
     echo "mount -t proc none /proc" >> ./init

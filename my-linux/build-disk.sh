@@ -4,7 +4,7 @@ bximage -mode=create -hd=500M -q my-linux.img
 sudo losetup /dev/loop0 my-linux.img
 sudo gparted /dev/loop0
 # create an MS-DOS partition table
-# create primary partition ext4
+# create primary partition ext2
 sudo fdisk -l /dev/loop0
 sudo losetup -o $((512*2048)) /dev/loop1 my-linux.img
 sudo mount /dev/loop1 /mnt
