@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">start_kernel: after sti</h1>
+
+<pre><code class="language-c">/* Interrupts are enabled now so all GFP allocations are safe. */
+gfp_allowed_mask = __GFP_BITS_MASK;
+// gfp_allowed_mask 默认为 GFP_BOOT_MASK = (__GFP_BITS_MASK & ~(__GFP_WAIT|__GFP_IO|__GFP_FS));
+// 显然原来在调用page allocator时是不能sleep的,现在中断处理什么的都ready了,可以去掉这些限制了</code></pre>
+
+<code>kmem_cache_init_late();</code> 空函数,什么也没做.<br><br>
+
+<code>console_init();</code> @see drivers/tty/tty_io.c#3212
+<pre><code class="language-c">tty_ldisc_begin();
+    tty_register_ldisc(N_TTY = 0, &tty_ldisc_N_TTY);
+        tty_ldiscs[NR_LDISCS = 30] = {
+            0 => tty_ldisc_N_TTY // tty_ldisc_N_TTY 定义了各项操作 open, close, read, write 对应的函数
+        }
+接下来一个while循环把__con_initcall_start到end的函数挨个执行一遍.
+// 查System.map可知 start = 0x1b88428, end = 0x1b88448, 所以应该有0x448-0x428 = 0x20 / 8 = 4个函数要执行,它们分别是:
+// con_init, hvc_console_init, xen_cons_init, serial8250_console_init
+
+con_init();
+    // 在setup_arch里conswitchp = &vga_con;
+    display_desc = conswitchp->con_startup(); // vgacon_startup()
+        /// screen_info是在setup_arch里直接从boot_params.screen_info copy的, boot_params.screen_info是grub加载内核时填充的
+        // bochs: writemem "/tmp/boot_params.memdump" 0xffffffff81b28380 4096
+        /* ./print_boot_params /tmp/boot_params.memdump
+            screen_info.orig_x = 0
+            screen_info.orig_y = 0
+            screen_info.ext_mem_k = 0x8000
+            screen_info.orig_video_page = 0
+            screen_info.orig_video_mode = 3
+            screen_info.orig_video_cols = 80
+            screen_info.flags = 0
+            screen_info.orig_video_ega_bx = 0
+            screen_info.orig_video_lines = 25
+            screen_info.orig_video_isVGA = 1
+            screen_info.orig_video_points = 16
+        */
+        vga_video_num_lines = 25;
+        vga_video_num_columns = 80;
+        vga_can_do_color = 1;
+        vga_vram_base = 0xb8000;
+        vga_video_port_reg = VGA_CRT_IC = 0x3d4;
+        vga_video_port_val = VGA_CRT_DC = 0x3d5;
+        vga_vram_size = 0x8000;
+        vga_console_resource = {.name = "vga+", .start = 0x3c0, .end = 0x3df}
+        vga_video_type = VIDEO_TYPE_VGAC;
+        display_desc = "VGA+";
+        request_resource(&ioport_resource, &vga_console_resource);
+        // @see http://www.jamesmolloy.co.uk/tutorial_html/3.-The%20Screen.html
+        ...
+        vga_vram_base = 0xffff8800000b8000
+        vga_vram_end  = 0xffff8800000c0000
+        vga_hardscroll_enabled = 1;
+        vga_default_font_height = 16;
+        vga_video_font_height = 16;
+        vga_scan_lines = 16 * 25 = 400
+        vga_xres = 80 * 8 = 640
+        vga_yres = 400
+        // .config里没有定义 CONFIG_VGACON_SOFT_SCROLLBACK, 所以vgacon_scrollback_startup();不产生任何实际指令
+        vga_init_done = 1;
+
+registered_con_driver[MAX_NR_OCN_DRIVER] 当前是空的,接下来 registered_con_dirver[0] = {conswitchp}
+con_driver_map当前也是空的,把它全都填充成conswitchp // MAX_NR_CONSOLES = 63
+
+blankinterval = 600
+blank_state = blank_normal_wait = 1
+mod_timer(&console_timer, jiffies + (blankinterval * HZ)); // 把console_timer设为10分钟以后
+
+MIN_NR_CONSOLES = 1
+接下来一个for循环,初始化了一个vc(virtual console).
+
+printable = 1
+
+register_console(&vt_console_driver);
+
+// 理一理console之间的关系
+struct vc {
+    struct vc_data *d;
+    struct work_struct SAK_work;
+}
+// kernel定义了63个vc, struct vc vc_cons [MAX_NR_CONSOLES = 63]
+// 当一个vc初始化时,给它分配一块内存用作vc_data,然后INIT SAK_work,其实就是把函数vc_SAK加到workqueue里,那么什么是Secure Attention Key(SAK)呢?
+// 比如有一些木马程序伪装成login program,让用户输入用户名密码,从而窃取帐号,SAK的作用就是允许用户按下键盘上的一个组合键,然后触发已经加到workqueue里的vc_SAK,
+// vc_SAK()把当前终端关联的所有程序全都kill掉,然后启动真的login program,从而让钓鱼程序起不上作用.
+struct vc_data {
+    struct tty_port port;
+    unsigned short vc_num;
+    unsigned int vc_cols;
+    unsigned int vc_rows;
+    ...
+    const struct consw *vc_sw;
+    unsigned short *vc_screenbuf;
+    unsigned int vc_screenbuf_size;
+    ...
+}
+// 在初始化vc的过程中,会设 vc_data.vc_sw = conswitchp; 对应我们的情况,就是 vga_con, 这个是真正干活的那个,在vc初始化之前, vgacon_startup()就已经运行过了,
+// vgacon_startup()根据GRUB传递过来的screen_info参数,得知vgacon的情况,比如是否支持颜色,console有多少行多少列等.
+// vc初始化过程中,会把vgacon的相关参数拿到,设到自身的数据结构中(visual_init -> con_init -> vgacon_init). 
+// 然后根据console有多少行,每行的大小计算出screenbuf_size,再分配内存给vc->screenbuf.
+
+vc初始化好之后,选一个当作fg_console(foreground),我们目前只有一个vc,那就是当前这个了.
+如果有多个的话,显然多个vc之间的切换其实就是选择不同的vc做fg_console,然后把vc->screenbuf的内容打印出屏幕上.
+
+多个vc最终归属到struct console上,在con_init的结尾,register_console(&vt_console_driver)把vt_console_driver加到了console_drivers里,
+vt_console_driver的write方法,也就是vt_console_print,找到fg_console,把字符打印到屏幕上.
+打印字符其实很简单了,关键是要先把pos给计算好,然后*pos = char就可以了.
+
+printk先把msg保存到log_buf里,log_buf默认大小为 1 << 18 = 256K,之后调用console_unlock时会遍历console_drivers,调用对应的console_driver的write方法把msg打印到屏幕上.
+
+// 接下来的三个init(hvc_console_init, xen_cons_init, serial8250_console_init), 由于con_init register_console时已经把preferred_console设为vt_console_driver了,
+// 所以hvc_console_init,serial8250_console_init尝试register_console(&hvc_console),register_console(&serial8250_console);失败,而xen_cons_init由于xen_pv_domain()返回0,早早的就返回了
+</code></pre><br>
+
+
+<code>if (panic_later) panic(...);</code> panic_later = 0 <br><br>
+
+<code>lockdep_info();locking_selftest();</code> 由于.config里没有定义CONFIG_LOCKDEP和CONFIG_DEBUG_LOCKING_API_SELFTESTS,这两个函数不产生任何实际指令.<br><br>
+
+<pre><code class="language-c">if (initrd_start && !initrd_below_start_ok && page_to_pfn(virt_to_page((void *)initrd_start)) < min_low_pfn) {
+    printk(KERN_CRIT "initrd overwritten (0x%08lx < 0x%08lx) - disabling it.\n", page_to_pfn(virt_to_page((void *)initrd_start)), min_low_pfn);
+    initrd_start = 0;
+}
+
+// initrd_start 在setup_arch -> reserve_initrd时赋值为 0xFFFF88000796E000
+// initrd_below_start_ok = 0
+// min_low_pfn = 0
+由于if的最后一个条件不满足,这段代码啥也没做
+</code></pre><br>
+
+<code>page_cgroup_init();</code>先跳过cgroup相关的代码.<br><br>
+
+<code>enable_debug_pagealloc(); kmemleak_init(); debug_objects_mem_init();</code><br>
+.config里没有定义CONFIG_DEBUG_PAGEALLOC,CONFIG_DEBUG_KMEMLEAK,CONFIG_DEBUG_OBJECTS, 所以这三个函数不产生任何实际指令.<br><br>
+
+<code>setup_per_cpu_pageset();</code><br>
+原来 zone->pageset=&boot_pageset, 这里重新分配了percpu pageset,不清楚做什么用的.
+<br><br>
+
+<code>numa_policy_init();</code>我们只有一个dummy_node,这个policy应该没啥作用,先跳过去.<br><br>
+
+<code>if (late_time_init) late_time_init();</code> late_time_init = x86_late_time_init;
+<pre><code class="language-c">x86_init.timers.timer_init(); // => hpet_time_init();
+// 在setup_arch -> acpi_boot_init -> acpi_table_parse(ACPI_SIG_HPET, acpi_parse_hpet) 时, 我们就知道没有hpet,这是因为bochs没有提供, 所以:
+    setup_pit_timer();
+/* @see http://wiki.osdev.org/PIT
+The Programmable Interval Timer (PIT) chip (also called an 8253/8254 chip) basically consists of an oscillator, a prescaler and 3 independent frequency dividers.
+
+The oscillator used by the PIT chip runs at (roughly) 1.193182 MHz.
+
+The basic principle of a frequency divider is to divide one frequency to obtain a slower frequency. This is typically done by using a counter.
+Each "pulse" from the input frequency causes the counter to be decreased, and when that counter has reached zero a pulse is generated on the output and the counter is reset.
+
+The PIT has only 16 bits that are used as frequency divider, which can represent the values from 0 to 65535.
+Since the frequency can't be divided by 0 in a sane way, many implementations use 0 to represent the value 65536.
+
+The PIT chip has three separate frequency dividers (or 3 separate channels) that are programmable, in that the value of the "reset counter" is set by software (the OS).
+Software also specifies an action to be taken when the counter reaches zero on each individual channel.
+In this way, each channel can be used in one of several "modes" - for example, as a frequency divider (where the count is automatically reset) or
+as a "one shot" timer (where the count isn't automatically reset).
+
+Channel 0 is connected directly to IRQ0, so it is best to use it only for purposes that should generate interrupts.
+Channel 1 is unusable, and may not even exist.
+Channel 2 is connected to the PC speaker, but can be used for other purposes without producing audible speaker tones.
+
+The PIT chip uses the following I/O ports:
+I/O port     Usage
+0x40         Channel 0 data port (read/write)
+0x41         Channel 1 data port (read/write)
+0x42         Channel 2 data port (read/write)
+0x43         Mode/Command register (write only, a read is ignored)
+*/
+/*
+看了OSDEV上对PIT的介绍我们知道,PIT oscillator runs at (roughly) 1.193182 MHz, 要想获取一个低频率的, 需要用到frequency divider,也就是个counter.
+counter值的范围是0-65535,也就是说,最慢我们能得到一个1193182/65535=18.2Hz=55.6ms的频率,最快就是1000000000ns/1193182=838ns
+这个静态的值称为reload value, 而实际运行过程中动态的counter值称为current counter,如果得到一个current counter值,怎么能计算出它相对上次reload的时间点过去多长时间呢?
+每次tick是838ns,乘以current counter就得到结果了
+kernel代码里不是这样做的,它先根据定义好的shift值,计算出一个multiplication factor,来做tick和ns之间的换算. 数学不好,不明白这是怎么个道理.
+*/
+        // pit_ce 0x1a0e600
+        pit_ce.name = "pit";
+        pit_ce.mult = 0x4e3245;
+        pit_ce.max_delta_ns = 0x1a308ea;
+        pit_ce.min_delta_ns = 0x311b;
+        pit_ce.shift = 0x20;
+        // max_delta_ns = 0x7FFF ticks, min_delta_ns = 0xF ticks, 也就是说kernel配置的的reload value范围在0xF-0x7FFF之间???
+        pit_ce.features = CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT;
+        // 这两个feature好理解,PERIODIC就是counter减为0的话,PIT会把counter重设为reload value,继续
+        // ONESHOT就是减为0后就不变了,等着程序去控制和处理接下来的事
+        pit_ce.set_mode = init_pit_timer;
+        // 当mode是PERIODIC时,先向port 0x43(Mode/Command register)写入0x34=0x0011 0100,表示:
+            /* 00  - select channel 0
+               11  - Access mode: lobyte/hibyte
+               010 - Operating mode: Mode 2 (rate generator)
+               0   - BCD/Binary mode: 16-bit binary
+            */
+        // 接着向port 0x40(channel 0 data port)写入LATCH = (CLOCK_TICK_RATE + HZ/2) / HZ = 0x12a5 = 4773 (4ms的频率)
+        // 由于一次只能写入8bit,先写lowbyte,再写highbyte, LATCH & 0xff 得到 lowbyte, LATCH >> 8 得到highbyte
+        // 当mode是SHUTDOWN或者是UNUSED时,向port 0x43(Mode/Command register)写入0x30=0x0011 0000,表示select channel 0, access mode lo/hi, ,operating mode: mode 0
+        // 然后向data port写入0,也就是把reload value调到最大,其实就相当于电脑刚启动时PIT的状态
+        // Typically during boot the BIOS sets channel 0 with a count of 65535 or 0 (which translates to 65536),
+        // which gives an output frequency of 18.2065 Hz (or an IRQ every 54.9254 ms)
+        // 当mode是ONESHOT时,向mode/command register写入0x38=0x0011 1000,表示operate mode: Mode 4 (software triggered strobe)
+        pit_ce.set_next_event = pit_next_event;
+        // pit_next_event()做的事就是修改reload value的值,配合ONESHOT,可以实现sleep功能了
+
+        // 总结一下,pit_ce给出了把PIT ticks和ns之间的换算办法,调用set_mode可以配置pit的工作模式和频率,set_next_event配合ONESHOT可以实现程序控制的timer
+
+        clockevents_register_device(&pit_ce);
+            static LIST_HEAD(clockevent_devices);
+            static RAW_NOTIFIER_HEAD(clockevents_chain);
+            list_add(&dev->list, &clockevent_devices);
+            clockevents_do_notify(CLOCK_EVT_NOTIFY_ADD, dev);
+            /* 在 start_kernel 的刚开始,有一个tick_init(),把tick_notifier加到了clockents_chain里, 当前clockevents_chain只有tick_notifier这一个
+               clockevents_do_notify调用了 tick_notifer 的handler, 对ADD事件, 处理方法是 tick_check_new_device
+               看下kernel/time/tick-common.c和include/linux/tick.h,看起来是每个cpu都会有一个tick_device.
+               struct tick_device {
+                   struct clock_event_device *evtdev;
+                   enum tick_device_mode mode; // 要么是PERIODIC,要么是ONESHOT
+               }
+               每个cpu的tick_device使用per_cpu变量tick_cpu_device保存,当前是空的. tick_cpu_device = 0x101a0 + 0x7c00000 = 0x7c101a0
+               tick_check_new_device先将pit_ce shutdown // clockevents_exchange_device(curdev = NULL, newdev = pit_ce);
+               然后把pit_ce设到当前cpu的tick_device里,并设mode为PERIODIC.
+               接着把pit_ce.event_handler设为tick_handle_periodic,并启用pit_ce的PERIODIC mode
+               OK, 到此,pit算是设好了
+            */
+            clockevents_notify_released(); // 这个函数把上边do_notify过程中release的device重新加到clockevent_devices list里去
+
+        global_clock_event = &pit_ce;
+
+    setup_default_timer_irq();
+        setup_irq(0, &irq0);
+        // 前边在init_IRQ时,irq 0做为legacy irq,分配了irq_desc,并将irq_desc.handle_irq设为handle_level_irq
+        // irq_settings_can_autoenable, irq_setup(desc), 看来init_IRQ里虽然初始化了PIC,但并没有让irq 0起作用,irq_setup unmask了 irq 0
+        // 然后将irq_desc.action设为irq0, irq_count = 0, irqs_unhandled = 0
+        register_irq_proc(irq, desc); // 由于root_irq_dir = NULL, 这个函数早早的返回了
+        new->dir = NULL;
+        register_handler_proc(irq, new); // 也什么都没做就返回了
+
+tsc_init(); // @see UnderstandingKernel Time Stamp Counter (TSC)
+    x86_init.timers.tsc_pre_init(); // => x86_init_noop
+    tsc_khz = x86_platform.calibrate_tsc(); // => native_calibrate_tsc, 在bochs上使用PIT计算出的结果是 0xf9f khz
+    syslog打印出 Fast TSC calibration using PIT. Detected 3.999 MHz processor. // 现在console能用了,就是好呀
+    // 接下来注释里写的很明白了,先假设所有的cpu都是这个速度
+    lpj_fine = 3999 * 1000 / 250 = 0x3e7c // lpj的意思也就是loops per jiffy, 一个tick是一个jiffy,在这一个tick的时间里,cpu能执行多少个nop指令
+    use_tsc_delay();
+    tsc_clocksource_reliable = 0;
+</code></pre><br>
+
+<code>sched_clock_init();</code> .config里配置了 CONFIG_HAVE_UNSTABLE_SCHED_CLOCK=y, 所以这个函数在 kernel/sched_clock.c#0105, 还不太明白具体有什么作用<br>
+这个函数做的事就是用当前时间(wall time)来初始化每个cpu的sched_clock_data. 然后标记 sched_clock_running = 1.<br><br>
+
+<code>calibrate_delay();</code>
+打印出 Calibrating delay loop (skipped), value calculated using timer frequency.. 7.99 BogoMIPS (lpj=15996=0x3e7c)<br>
+@see Linux Kernel Development Page 227<br><br>
+
+</div>
+<script src="prism.js"></script>
+</body>
+</html>
