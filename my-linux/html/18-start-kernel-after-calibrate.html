@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">start_kernel: pidmap_init</h1>
+
+<code>pidmap_init();</code>
+<pre><code class="language-c">// .config里定义CONFIG_BASE_SMALL=0,所以PID_MAX_LIMIT=0x8000=32768
+pid_max_min = RESERVED_PIDS + 1 = 300 + 1 = 301
+pid_max_max = PID_MAX_LIMIT = 0x8000 = 32768
+pid_max = 32768
+syslog打印出 pid_max: default 32768 minimum: 301
+
+struct pidmap {
+    atomic_t nr_free;
+    void *page;
+};
+
+struct pid_namespace init_pid_ns = {
+    struct kref kref = {.refcount = 2};
+    struct pidmap pidmap[PIDMAP_ENTRIES = 1] = {
+       0: nr_free = 0x7FFF, page = kzalloc(PAGE_SIZE, GFP_KERNEL) // 分配一个page做pidmap, 显然是每个bit表示一个pid,这样一个page可以表示0x1000*8=0x8000个pid,正好是默认的PID_MAX_LIMIT
+                                                                  // 注释里说reserved pid 0, 应该是pid 1吧,pid 1是init task,永远不会free掉
+                                                                  // 由于pid 1已经占用一个了,所以nr_free = 0x7fff
+    };
+    int last_pid = 0;
+    struct task_struct *child_reaper = &init_task;
+    struct kmem_cache *pid_cachep => KMEM_CACHE(pid, SLAB_HWCACHE_ALIGN | SLAB_PANIC); // include/linux/pid.h的开头注释里写的很清楚为什么要有一个struct pid
+    unsigned int level = 0;
+    struct pid_namespace *parent;
+    struct vfsmount *proc_mnt;
+    struct bsd_acct_struct *bacct;
+}
+</code></pre>
+<code>anon_vma_init();</code> 创建两个slab: anon_vma, anon_vma_chain. <br><br>
+
+<code>efi_enabled = 0</code><br><br>
+
+<code>thread_info_cache_init();</code> 空函数<br><br>
+
+<code>cred_init();</code> 创建一个slab: cred_jar<br><br>
+
+<code>fork_init(totalram_pages);</code>
+<pre><code class="language-c">task_struct_cachep = kmem_cache_create(...); // 首先,创建slab task_struct, 在bochs可以看到 sizeof(struct task_struct) = 0x16d8 = 5.7K
+                                             // 再加上thread_info,也就是kernel stack, 8K, 一个进程至少要消耗13.7K的内存
+                                             // 按默认的PID_MAX_LIMIT计算: 0x8000 * 13.7K = 438.4M
+arch_task_cache_init(); // 再创建一个slab: task_xstate
+max_threads = mempages / (8 * THREAD_SIZE / PAGE_SIZE) = 0x6fa; // 根据可用内存的大小,计算出max_threads, 注释里也写的很清楚,系统能正常启动,至少需要20个thread
+</code></pre>
+
+<code>proc_caches_init();</code> 分配了一系列的slab: sighand_cache, signal_cache, files_cache, fs_cache, mm_struct, vm_area_struct<br><br>
+
+<code>buffer_init();</code> 创建slab buffer_head<br><br>
+
+<code>key_init();</code> 创建slab key_jar<br><br>
+
+<code>security_init();</code> 初始化default_security_ops并调用security_initcall
+<pre><code class="language-c"> // __security_initcall_start = 0x1b88448, end = 0x1b88468, 当中有4个function
+selinux_init();
+smack_init();
+tomoyo_init();
+apparmor_init();
+// 不清楚这些是干什么的,先跳过去
+</code></pre>
+
+<code>dbg_late_init();</code> dbg_is_early = false; kdb_init(KDB_INIT_FULL); 不清楚kernel debug, 先跳过去<br><br>
+
+<code>vfs_caches_init(totalram_pages);</code> 这一部分开始说到文件系统的东西,我们先了解下syscall和mount,再接着看.
+<pre><code class="language-c">// syscall
+// @see Linux Kernel Development chapter 5: System Calls
+// 这一章是从kernel讲到user space的,我们反过了验证一下.
+
+man _syscall
+man syscall
+
+// man page里已经说了
+// Starting around kernel 2.6.18, the _syscall macros were removed from header files supplied to user space.  Use syscall(2) instead.
+// 所以书里说的 _syscalln() macros 已经不能用了.
+
+// Ubuntu12.04的glibc安装在 /lib/x86_64-linux-gnu/libc.so.6 -> libc-2.15.so
+// 我们写个小程序来跟踪执行一下.
+
+sudo apt-get install libc6-dbg
+apt-get source libc6-dbg
+
+cat /tmp/a.c
+
+#include &lt;unistd.h&gt;
+#include &lt;sys/syscall.h&gt;
+#include &lt;sys/types.&gt;
+
+int main(void)
+{
+    pid_t tid;
+    tid = syscall(SYS_gettid);
+    return 0;
+}
+
+gcc -g -Wall a.c
+nemiver a.out
+
+// syscall()方法定义在 eglibc-2.15/sysdeps/unix/sysv/linux/x86_64/syscall.S里
+
+	.text
+ENTRY (syscall)
+	movq %rdi, %rax		/* Syscall number -> rax.  */
+	movq %rsi, %rdi		/* shift arg1 - arg5.  */
+	movq %rdx, %rsi
+	movq %rcx, %rdx
+	movq %r8, %r10
+	movq %r9, %r8
+	movq 8(%rsp),%r9	/* arg6 is on the stack.  */
+	syscall			/* Do the system call.  */
+	cmpq $-4095, %rax	/* Check %rax for error.  */
+	jae SYSCALL_ERROR_LABEL	/* Jump to error handler if error.  */
+L(pseudo_end):
+	ret			/* Return to caller.  */
+
+// 在linux启动进入C语言环境前, kernel enable 了 System-Call Extension (SCE) Bit, 使得 syscall 指令可用.
+// 在start_kernel() -> trap_init() -> cpu_init() -> syscall_init() 里:
+wrmsrl(MSR_LSTAR, system_call);
+// In 64-bit mode, SYSCALL saves the RIP of the instruction following the SYSCALL into RCX and loads the new RIP from LSTAR bits 63:0.
+
+// system_call定义在 arch/x86/kernel/entry_64.S#0455:
+// 首先把%rsp切换到kernel_stack上,kernel_stack是个percpu变量,应该在每次task切换时修改的吧.
+// 然后 SAVE_ARGS 8,1. SAVE_ARGS将%rdi,%rsi这些寄存器里的参数保存到kernel_stack上,因为syscalls都是asmlinkage的,意思是:
+//    This is a directive to tell the compiler to look only on the stack for this function’s arguments.
+// 接着比较%rax里的syscall number和__NR_syscall_max,看是否是瞎传的值.
+// __NR_syscall_max 定义在 arch/x86/kernel/asm-offsets_64.c 里, 系统定义的SYSCALL在arch/x86/include/asm/unistd_64.h里,当前共有307个,编号从0-306.
+// 在 arch/x86/kernel/syscall_64.c 里有一个 sys_call_table[307] = {[0...307] = &sys_ni_syscall}, 默认所有系统调用都是 sys_ni_syscall,
+// include了&lt;asm/unistd_64.h&gt;后,table里syscall number和syscall function才对应上. 好吧, C语言还有这样的写法, 以前真不知道.
+// 一个小的验证程序:
+
+cat a.h
+[1] = 2,
+[3] = 4,
+
+cat a.c
+#include <stdio.h>
+
+int table[10+1] = {
+	[0 ... 10] = 10,
+	#include "a.h"
+};
+
+int main(void)
+{
+	int i;
+	for (i = 0; i < 10; i++) {
+		printf("table[%d] = %d\n", i, table[i]);
+	}
+	return 0;
+}
+
+// 最后 call *sys_call_table(,%rax,8) 调用了最终的 sys_XXX function. 调用结束后,返回 user space 前, 检查 NEED_RESCHED, 如果需要 call schedule.
+
+// syscalls的定义是通过7个macro实现的: SYSCALL_DEFINE0 - SYSCALL_DEFINE6, 所以如果在lxr里搜索一个系统调用,直接搜索 sys_XXX 可能搜不出来. 比如
+// sys_open(const char *filename, int flags, int mode) 的定义是 SYSCALL_DEFINE3(open, const char __user *, filename, int, flags, int, mode)
+// 所以要搜索 SYSCALL_DEFINEX(name 才能找到
+
+
+// VFS
+// @see Linux Kernel Development Chapter 13 The Virtual Filesystem
+// @see UnderStandingKernel chapter 12 The Virtual Filesystem
+
+struct file_system_type {
+    char *name;                     // 文件系统名称,比如ext4的在fs/ext4/super.c里定义时就写明了是"ext4"
+    struct file_system_type *next;  // kernel里所有的文件系统形成一个单链表,链表头是 file_systems
+
+    struct super_block *(*get_sb)(...); // read superblock from disk
+
+    struct list_head fs_supers;
+}
+
+// 当一个分区被mount时,一个struct vfsmount出来了.
+struct vfsmount {
+    struct super_block *mnt_sb;     // 这个分区对应的super_block
+    struct dentry *mnt_root;        // 这个分区的根目录?
+    struct dentry *mnt_mountpoint;  // 分区在整个目录结构树里被mount到哪个位置上了
+
+    char *mnt_devname;              // device file name, 是指 /dev/sdaX 吗?
+
+    struct vfsmount *mnt_parent;    // 上一级目录的vfsmount
+}
+
+struct task_struct {
+    // ...
+    struct fs_struct *fs;
+    struct files_struct *files;
+    struct nsproxy *nsproxy;
+    // ...
+}
+
+task->nsproxy里包含了 struct mnt_namespace {
+    struct vfsmount *root; // 根目录, 这样的话,每个进程看到的目录结构树都可以不一样. chroot 是用的这个吗?
+    // ...
+}
+
+struct fs_struct {
+    struct path root, pwd;
+    // ...
+}
+struct path {
+    struct vfsmount *mnt;
+    struct dentry *dentry;
+}
+// mnt_namespace决定了task看到的目录树,fs_struct确定了task的当前工作目录和根目录.
+
+struct files_struct {
+    struct fdtable fdtab;
+    int next_fd;
+    struct file *fd_array[NR_OPEN_DEFAULT = 64];
+
+    struct fdtable *fdt;
+}
+struct fdtable {
+    struct fdtable *next; // fdtable可以形成一个单链表
+    struct file **fd;
+}
+// 如果一个进程打开的文件少于64个,那个task->files->fdtab和task->files->fd_array就够用了,如果多于64个,那就要新加fdtable和fd_array了.
+
+struct super_block {
+    struct list_head s_list; // 所有的super_block形成一个双链表,链表头是 super_blocks, 定义在 fs/super.c
+    void *s_fs_info;
+    u8 s_dirt;               // 各个文件系统可以根据自己的情况来存储数据到s_fs_info,一般来说,它对应着硬盘上的数据,在运行过程中,kernel只修改s_fs_info,
+                             // 并不立即把修改同步到硬盘,s_dirt字段就是用来标记是否做了修改.
+
+    struct file_system_type *s_type;  // filesystem type
+    struct super_operations *s_op = {
+        alloc_inode
+        destroy_inode
+        write_inode
+        delete_inode
+        sync_fs
+        statfs
+        remount fs
+    }
+
+    unsigned long s_flags;  // monut flags
+    unsigned long s_magic;  // filesystem magic number
+    struct dentry *s_root;  // directory monut point
+
+    struct list_head s_inodes; // list of inodes
+
+    struct list_head s_instances; // 对应 file_system_type.fs_supers
+};
+
+struct inode {
+    struct list_head i_sb_list; // 对应 super_block.s_inodes
+    struct super_block *i_sb;   // 对应的super_block
+
+    struct hlist_node i_hash; // 对应inode_hashtable
+
+    blkcnt_t i_blocks;          // the number of blocks allocated to file
+
+    unsigned long i_ino;    // inode number
+    atomic_t i_count;       // reference counter
+    unsigned int i_nlink;   // number of hard links
+    uid_t i_uid;    // owner user id
+    gid_t i_gid;    // owner group id
+
+    loff_t i_size;  // file size in bytes
+    struct timespec i_atime;    // last file access time
+    struct timespec i_mtime;    // last file write time
+    struct timespec i_ctime;    // last inode change time
+
+    struct inode_operations *i_op = {
+        int (*create) (struct inode *,struct dentry *,int, struct nameidata *);
+        struct dentry * (*lookup) (struct inode *,struct dentry *, struct nameidata *);
+        link
+        unlink
+        symlink
+        mkdir
+        rmdir
+        rename
+        truncate
+    }
+
+    struct file_operations *i_fop;
+};
+
+struct file {
+    struct path f_path;
+
+    fmode_t f_mode; // process access mode
+    loff_t f_pos;   // current file offset(file pointer)
+
+    struct file_operations *f_op = {
+        // 当一个进程打开一个文件时,先读取inode,在inode的i_fop里记着操作这个文件的方法,然后在创建struct file时,f_op=i_fop
+        read
+        write
+        poll
+        open
+        mmap
+    }
+}
+
+struct dentry { // 平时写的路径 /home/user/Desktop/README.md 里的每一项 /, home, user, Desktop, README.md 都对应着一个dentry struct
+    struct qstr d_name; // quick string {int hash, int len, char *name} Filename
+
+    struct inode *d_inode; // 具体的操作还是要在inode上做
+                           // 一个dentry有三个状态: used, unused, negative, 主要取决于inode的情况
+                           //   used: dentry有对应的inode并且正在使用中,比如open了一个文件,还没有close
+                           //   unused: dentry有对应的inode但没有使用,比如之前open了一个文件,但已经close了
+                           //   negative: dentry没有对应的inode,可能是被删除了,也可能是一个失败的open留下来的,像file_exists(/path/to/file)
+    struct list_head d_subdirs; // 子目录
+    struct dentry_operations *d_op = {
+        d_hash // 使用这个函数计算hash value -> dentry_hashtable
+    }
+    struct super_block *d_sb;
+};
+// dcache: 把路径/path/to/file和对应的dentry做出来一个hashtable: dentry_hashtable,当打开一个文件时,先从hashtable里查找,如果找不到,再按路径一点点找
+// icache: dentry关联的inode也cache起来
+
+
+/*
+总结一下:
+
+一个mnt_namespace由多个filesystem组成,这些个filesystem里哪个当作root directory呢?这就是root和list的用处.
+struct mnt_namespace {
+    atomic_t count;         // 从一个进程fork出来的子进程默认共享同一个namespace,那有多少个进程在使用这个namespace呢,用这个count记录着.
+    struct vfsmount *root;
+    struct list_head list;
+}
+
+一个分区可以被mount很多次,形成多个vfsmount,不过super_block始终只有一个,这多个vfsmount的mnt_sb都批向一个struct super_block;
+一个mount point可以mount很多个filesystem(stacked).
+
+一个filesystem是怎么被mount上的? 看下system_call sys_mount(),原型定义在include/linux/syscalls.h里
+asmlinkage long sys_mount(char *dev_name, char *dir_name, char *type, u64 flags, void *data);
+参数很明白: 把一个dev mount到dir,文件系统类型是type,mount要求设在flags里.
+具体实现在 fs/namespace.c#2490 里. 最终做mount工作的是 do_mount 函数.
+do_mount首先找到dir_name,用path表示,我们知道struct path {vfsmount, dentry},所以这又是个先有鸡还是先有蛋的例子,肯定在这之前要有一个filesystem已经mount好了.
+然后根据flags参数的要求,执行不同的mount:
+do_remount(&path, flags & ~MS_REMOUNT, mnt_flags, data_page) // 一般是用来修改 mount flags
+do_loopback(&path, dev_name, flags & MS_REC)
+do_change_type(&path, flags)
+do_move_mount(&path, dev_name) // change the mount point of an already mounted filesystem
+do_new_mount(&path, type, flags, mnt_flags, dev_name, data_page)
+来看下 do_new_mount, 这个函数分两步, 第一步do_kern_mount做真正的mount操作,生成vfsmount, 第二步do_add_mount把刚刚得到的vfsmount加到当前进程的mnt_namespace里.
+do_kern_mount首先根据char *type找到对应的struct file_system_type, 然后调用vfs_kern_mount()完成mount工作.
+vfs_kern_mount()首先调用alloc_vfsmnt从mnt_cache slab里取得一个vfsmount,然后调用mount_fs()彻底完成mount工作,mount_fs返回一个dentry root.
+mnt->mnt_root       = root;
+mnt->mnt_sb         = root->d_sb;
+mnt->mnt_mountpoint = mnt->mnt_root;
+mnt->mnt_parent     = mnt;
+这里可以看到,一个刚刚mount好的文件系统,它的mount_point和parent都是它自己. 在第二步do_add_mount里,会调用mnt_set_mountpoint()把mount_point和parent都设成path的.
+OK,这里有一个问题,这个新mount的文件系统知道自己的parent,但是parent怎么在访问到path时怎么知道这个文件系统呢?
+在mnt_set_mountpoint里有一句 dentry->d_flags |= DCACHE_MOUNTED, dentry的这个标记说明它是个mountpoint.
+那么操作系统是怎么进入新mount的文件系统呢?
+系统内所有mount的文件系统都放在一个mount_hashtable里,hash的方法就是 hash(mnt, dentry). 遍历hashtable的这一项,就能找到mountpoint上的文件系统.然后就有了新文件系统的root dentry.
+好吧,mount_fs()实际上并没有做啥,它调用的是file_system_type的mount方法完成的mount工作,file_system_type的mount方法完成mount的标记就是成功的返回了一个dentry root.
+显然每个file_system_type的mount方法是不一样的.
+*/
+</code></pre>
+<pre><code class="language-c">names_cachep = kmem_cache_create("names_cache", PATH_MAX = 4096, ...);
+dcache_init();
+    dentry_cache = KMEM_CACHE(dentry, ...);
+    register_shrinker(&dcache_shrinker); // 显然是内存不够用时,用这个shrinker来释放一部分dentry来取得可用内存
+    // hashdist = 1, 所以 dcache_init_early 里啥都没做,这里继续
+    dentry_hashtable = alloc_large_system_hash("Dentry cache", ...); // 上边我们知道dentry_hashtable是要把path hash 到 dentry
+inode_init();
+    inode_cachep = kmem_cache_create("inode_cache", ...);
+    register_shrinker(&icache_shrinker);
+    inode_hashtable = alloc_large_system_hash("Inode-cache", ...)
+files_init(mempages);
+    filp_cachep = kmem_cache_create("filp", sizeof(struct file), ...); // 我们平时读写文件都是通过struct file
+    files_stat.max_files = max(可用内存的10%用于file,每个file和其关联的inode及dcache大约需要1K内存,相除之后就得到max_files,如果不够8192,那就按8192算); // 具体在哪个地方使用这个限制还不清楚
+mnt_init();
+    mnt_cache = kmem_cache_create("mnt_cache", sizeof(struct vfsmount), ...)
+    mount_hashtable = (struct list_head *)__get_free_page(GFP_ATOMIC);
+    sysfs_init();
+        sysfs_dir_cachep = kmem_cache_create("sysfs_dir_cache", sizeof(struct sysfs_dirent), ...);
+        sysfs_inode_init(); => bdi_init(&sysfs_backing_dev_info); // backing device info init
+            struct backing_dev_info sysfs_backing_dev_info = {
+                .name = "sysfs",
+                .ra_pages = 0, // max readahead,
+                .capabilities = BDI_CAP_NO_ACCT_AND_WRITEBACK,
+                .dev = NULL,
+                .min_ratio = 0,
+                .max_ratio = 100,
+                ...
+            }
+        register_filesystem(&sysfs_fs_type);
+            struct file_system_type sysfs_fs_type {
+                .name = "sysfs",
+                .mount = sysfs_mount,
+                .kill_sb = sysfs_kill_sb
+            }
+        // 上边在了解vfs及sys_mount时,我们知道,kernel支持的文件系统格式都要通过register_filesystem加到链表file_systems里.
+        // 然后在sys_mount时,拿着传递的参数char *type到这个链表里找到对应的file_system_type,然后调用其mount方法完成mount.
+        // 对sysfs_fs_type来说,sysfs_mount这个方法是关键,它要返回一个struct dentry *root.
+        // 在 bochs 里查看可知, sysfs 是第一个注册的文件系统.
+        struct vfsmount *sysfs_mnt = kern_mount(&sysfs_fs_type); => vfs_kern_mount(&sysfs_fs_type, MS_KERNMOUNT, "sysfs", NULL)
+        // 上边在了解vfs及sys_mount时,我们知道,要把一个文件系统mount到一个指定的mountpoint上,首先要找到mountpoint的path,这是一个先有鸡还是先有蛋的问题.
+        // 这里要mount sysfs,它直接调用vfs_kern_mount,跳过了mountpoint,其实相当于do_new_mount的第一步.
+        // sysfs mount结束后,它的parent是它自己,mountpoint也是它自己.
+        // 显然,如果后边要使用时,还需要调用do_move_mount()来调整mount_point.
+        // OK, 现在要搞明白sysfs的mount,就得弄清楚sysfs_mount的具体实现了
+            /*
+                Linux Kernel Development Chapter 17: Devices and Modules 有讲到 kobjects 和 sysfs
+                struct kobject {
+                    const char *name;
+                    struct list_head entry;
+                    struct kobject *parent;
+                    struct kset *kset;          // kset是按逻辑概念归类kobject的,比如所有的block devices
+                    struct kobj_type *ktype;    // ktype是按操作归类kobject的
+                    struct sysfs_dirent *sd;    // kobject在sysfs里的具体表现就是它了,它关联着一个inode
+                    struct kref kref;
+                }
+                struct kobj_type {
+                    void (*release)(struct kobject *);
+                    const struct sysfs_ops *sysfs_ops;
+                    struct attribute **default_attrs; // 这个数组里的东西在sysfs里都是一个个文件
+                }
+                sysfs挂载在/sys上.
+                sysfs至少要有10个目录: block, bus, class, dev, devices, firmware, fs, kernel, module, power
+            */
+            struct dentry *sysfs_mount(struct file_system_type *fs_type, int flags, const char *dev_name, void *data);
+                // KOBJ_NS_TYPE有两个,一个是NONE,一个是NET,每一个都有对应的operations,保存在kobj_ns_ops_tbl里.目前这个table是空的
+                // 所以sys_mount开头分配的struct sysfs_super_info初始化后info->ns[NONE] = NULL; info->ns[NET] = NULL
+                sb = sget(fs_type, sysfs_test_super, sysfs_set_super, info);
+                // 一个file_system_type可能会有好几个instance,比如一块硬盘上有三个ext4分区,也就是说ext4这个file_system_type有3个instance
+                // 每个instance都有一个对应的super_block,那么如何区分这3个instance呢? super_block->s_fs_info可以用来存储 filesystem private info
+                // 只需在第一次生成super_block时把s_fs_info设上,后边就能根据s_fs_info做出来区分了
+                // 一个file_system_type的多个instance的super_block记录在file_system_type.fs_supers这个链表中
+                // sget做的事就是遍历这个链表,调用file_system_type对应的test方法,比对s_fs_info,来查找super_block,如果找到了,说明之前已经mount过了
+                // 直接返回这个super_block就结束了. 如果没找到,就新创建一个super_block,然后调用对应的set方法,把s_fs_info给设上,并做好super_block的
+                // 初始化工作,然后把它加到file_system_type.fs_supers链表中,返回这个super_block.
+                // 这里要提一下,所有file_system_type的super_block存放在链表super_blocks里.
+                // 接着说sysfs的sget,当前super_blocks是空的,显然这是kernel遇到的第一个super_block,就要新创建一个.
+                // 由于这是个新创建的super_block,显然它的s_root为NULL,所以接着调用了
+                sysfs_fill_super(sb, data=NULL, slient=0);
+                // 上边了解vfs时我们知道,vfs里的这些概念super_block,inode,dentry等,都会有对应的operations. sysfs_fill_super一开始,就把sb->s_op 设为 sysfs_ops.
+                // 接下来的关键逻辑是以下4行代码
+                    struct inode *inode = sysfs_get_inode(sb, &sysfs_root);
+                    struct dentry *root = d_alloc_root(inode);
+                    root->d_fsdata = &sysfs_root;
+                    sb->s_root = root;
+                    // 首先要取得一个inode.
+                    // iget_locked(sb, ino)方法可以根据inode number取得一个inode,显然这种情况下ino要能够做为inode的唯一标记,有点像数据库的Primary Key. 
+                    // 取inode分两种情况,如果ino对应的inode已经在inode_hashtable里了,找到它,直接返回就好了,否则就要新创建一个再返回
+                    // 新创建的inode的i_state里有I_NEW标记,可以用来区分是哪种情况,如果是新创建的,调用sysfs_init_inode()初始化
+                    // 初始化过程中很重要的逻辑就是根据inode的类型,是SYSFS_DIR,SYSFS_KOBJ_ATTR,SYSFS_KOBJ_LINK 来设定inode对应的operations.
+                    // 接下来d_alloc_root调用d_alloc新创建了一个root dentry,根据d_alloc的逻辑可以知道,一个dentry的parent就是dentry->d_parent,
+                    // 而它的子目录及文件就是dentry->d_subdirs. 最后调用d_instantiate将dentry->d_inode设为刚刚取得的inode.
+            /*
+                OK, 我们回过头来理一下file_system_type, super_block, dentry, inode之间的关系.
+                1. 根据file_system_type.fs_supers我们能找到这个file_system_type的所有super_block
+                2. 根据super_block.s_root我们能找到root dentry
+                3. 根据dentry.d_subdirs我们能找到其下的子目录及文件
+                4. 根据dentry.d_inode我们能拿的这个目录或文件的metadata
+                5. 根据inode.i_op我们可以对这个文件或目录进行rename, truncate等操作
+                6. 根据inode.i_fop我们可以对这个文件进程read,write,seek等操作
+                7. 进程打开一个文件读写时,是在操作struct file,根据file.f_path可以找到super_block和dentry,进而找到了inode,然后就能操作了.(这一条待验证)
+             */
+
+            /*
+                我们写个小程序print_super_block把sysfs的super_block打印出来看看
+                sizeof(struct super_block) = 0x2d0
+                bochs: writemem "/tmp/sysfs_sb.memdump" 0xFFFF880006C08400 0x2d0
+
+                s_id = sysfs
+                file_system_type = 0xffffffff81a48cc0
+                super_operations = 0xffffffff8161fd80
+                s_fs_info = 0xffff880006c002e0
+                root dentry = 0xffff880006804000
+                dentry operations = (nil)
+            */
+
+    fs_kobj = kobject_create_and_add("fs", NULL); => struct kobject *kobject_create_and_add(const char *name, struct kobject *parent);
+    // 注释里说的清楚, name参数指的是kset,前边我们知道kset是按逻辑概念归类kobject的.
+        kobj = kobject_create();
+        // 创建一个ktype为dynamic_kobj_ktype的kobject,前边我们知道ktype是按操作归类kobject的
+        // 简单初始化后,这个kobject的状态为 state_in_sysfs = 0, state_initialized = 1
+        // 注意:现在这个kobject的kset为NULL
+        kobject_add(kobj, parent = NULL, "%s", name="fs");
+        // kobject_add的过程中,如果parent为NULL,则看kset,如果有对应的kset,则把parent设为kset的kobject,如果没有kset,则这个kobject就放在sysfs根目录下
+        // 当前的情况就是parent为NULL,kset也为NULL,所以这个kobject的parent就是sysfs_root
+            kobj->name   = "fs";
+            kobj->parent = NULL;
+            kobj->kset   = NULL;
+            kobj->ktype  = &dynamic_kobj_ktype;
+        // 接着调用sysfs_alloc_ino取得一个inode number,拿着这个inode number初始化一个sysfs_dirent,然后把这个dirent加到sysfs_root下边做为child
+        // 然后调用populate_dir,如果kobject对应的ktype有默认的attrs,则将它们创建成文件(sysfs_create_file).
+        // dynamic_kobj_ktype.default_attrs = NULL,所以populate_dir什么都没做
+        // 这里理一下sysfs_dirent
+            struct sysfs_dirent {
+                const char *s_name;
+                ino_t s_ino;
+                struct sysfs_dirent *s_parent;
+                struct sysfs_dirent *s_sibling;
+                union {
+                    struct sysfs_elem_dir s_dir;
+                    struct sysfs_elem_dir s_symlink;
+                    struct sysfs_elem_attr s_attr;
+                    struct sysfs_elem_bin_attr s_bin_attr;
+                }
+                struct sysfs_inode_attrs *s_iattr;
+            }
+            struct sysfs_elem_dir {
+                struct kobject *kobj;
+                struct sysfs_dirent *children;
+            }
+            // sysfs_dirent的上下层级关系由s_parent维护,同一层里的dirent由s_sibling按ino大小串联起来
+            // 一个dir类型的sysfs_dirent,它的子目录和文件由dir.children和s_sibling构成一个链表
+            // 这里有个疑问,kobject_add只是加上了sysfs_dirent,但并没有dentry,那/sys/fs对应的dentry是什么时间生成的呢?
+
+    init_rootfs(); // 仅仅register_filesystem(&rootfs_fs_type),现在我们有两个filesystem了,一个是sysfs_fs_type,一个是这个rootfs_fs_type
+    init_mount_tree();
+        mnt = do_kern_mount("rootfs", 0, "rootfs", NULL); => struct vfsmount *do_kern_mount(char *fstype, int flags, char *name, void *data);
+        // 刚刚init_rootfs仅仅注册了rootfs_fs_type,这里紧接着就mount了. mount的逻辑和上边sysfs是一样的,最终结果是rootfs的parent是它自己,mountpoint也是它自己的root dentry
+        // 不过做为rootfs,它应该不需要再更改mountpoint了
+        ns = create_mnt_ns(mnt);
+        // 前边我们知道,一个mnt_namespace由多个filesystem组成,但要指定一个filesystem做为root,create_mnt_ns()创建了一个mnt_namespace,并把刚刚mount的rootfs做为这个namespace的root
+        // 有一个地方值得注意一下, create_mnt_ns()把新创建的ns加到了rootfs的mnt_list里,也就是说,通过遍历rootfs.mnt_list就能拿到所有的mnt_namespace
+        init_task.nsproxy->mnt_ns = ns;
+        struct path root = {
+            .mnt = ns->root,
+            .dentry = ns->root->mnt_root
+        }
+        set_fs_pwd(current->fs, &root);
+        set_fs_root(current->fs, &root);
+        // OK. 到此,init_task的root和pwd都定下来了,就是这个rootfs的root dentry.
+
+bdev_cache_init();
+    register_filesystem(&bd_type);
+    kern_mount(&bd_type);
+    // 现在有三个filesystem_type了
+
+chrdev_init(); // 不清楚干什么用的
+</code></pre>
+
+<code>signals_init();</code> sigqueue_cachep = KMEM_CACHE(sigqueue, SLAB_PANIC); <br><br>
+
+<code>page_writeback_init();</code> 先跳过去<br><br>
+
+<code>proc_root_init();</code>
+<pre><code class="language-c">register_filesystem(&proc_fs_type);
+kern_mount_data(&proc_fs_type, &init_pid_ns); // super_block.s_fs_info = &init_pid_ns;
+
+init_pid_ns.proc_mnt = mnt; // 在pidmap_init()里已经初始化了init_pid_ns的pidmap,这里proc_mnt也有了
+
+proc_symlink(name = "mounts", parent = NULL, dest = "self/mounts");
+    struct proc_dir_entry *ent = __proc_create(&parent = NULL, name = "mounts", mode = S_IFLNK | S_IRUGO | S_IWUGO | S_IXUGO, nlink = 1);
+        xlate_proc_name(name, parent, &fn); // 这个函数把路径给格式化,如: mounts => parent = /proc, fn = mounts,再如: /proc/tty/driver/serial => parent = /proc/tty/driver, fn = serial
+        接下来分配个struct proc_dir_entry,但要多分配出strlen(fn) + 1个字节,这样可以把fn放到proc_dir_entry的后边,然后proc_dir_entry.name指向struct的结尾 /*  
+             __________________
+            |                  |
+            |  proc_dir_entry  | <-- struct proc_dir_entry, entry.name ---|
+            |__________________|                                          |
+            |    fn            | <-- "mount", "serial"      <-------------| */
+    ent->data = "self/mounts"; // 分配一小块内存,把"self/mounts" copy过去
+    proc_register(parent = /proc, ent); // 根据ent的mode,设上不同的proc_iops,"mounts"是S_IFLNK,所以proc_iops = &proc_link_inode_operations
+        ent->next = parent->subdir;
+        ent->parent = parent;
+        parent->subdir = ent;
+        // 最开始时,parent->subdir = NULL, 所以第一个register的ent->next=NULL, 后边再register新的ent时, 向链表头部插入
+        // proc.subdir -> mounts -> NULL
+        // proc.subdir -> NEW registered -> mounts -> NULL
+    /*
+        看了sysfs和proc_fs之后,有点概念了.
+        硬盘的inode信息是物理存储在硬盘上的,sysfs和proc_fs是没有物理存储的,它们的inode信息直接就在内存里构造出来.
+        注意这里说的是inode信息,不是struct inode, struct inode还是要在需要的时候生成,但对应文件的inode信息始终都要有的.
+        sysfs对应着sysfs_dirent, proc_fs对应着proc_dir_entry.
+    */
+
+    // 这个proc_symlink仅仅创建了一个/proc/mounts软链接文件,指向/proc/self/mounts,后者显然现在还不存在,这也是软链接的特性,它不用管指向的target是否存在
+
+proc_net_init();
+    proc_symlink("net", NULL, "self/net"); // 和上边一个逻辑,生成一个entry,name="net",data="self/net"
+    register_pernet_subsys(&proc_net_ns_ops); // 先跳过去
+
+proc_mkdir("sysvipc", NULL);
+proc_mkdir("fs", NULL);
+proc_mkdir("driver", NULL);
+proc_mkdir("fs/nfsd", NULL); // proc_mkdir和proc_symlink比较像,区别在于调用__proc_create创建ent时mode=S_IFDIR,从而ent.proc_iops不同,其它逻辑都一样
+
+proc_tty_init();
+    proc_mkdir("tty", NULL);
+    proc_tty_ldisc = proc_mkdir("tty/ldisc", NULL);
+    proc_tty_driver = proc_mkdir_mode("tty/driver", S_IRUSR|S_IXUSR, NULL);
+    proc_create("tty/ldiscs", 0, NULL, &tty_ldiscs_proc_fops); // 创建文件/proc/tty/ldiscs, 并指定ent.proc_fops = tty_ldiscs_proc_fops
+    proc_create("tty/drivers", 0, NULL, &proc_tty_drivers_operations);
+
+proc_mkdir("bus", NULL);
+
+proc_sys_init();
+    proc_sys_root = proc_mkdir("sys", NULL);
+    proc_sys_root->proc_iops = &proc_sys_dir_operations;
+    proc_sys_root->proc_fops = &proc_sys_dir_file_operations;
+    proc_sys_root->nlink = 0;
+</code></pre>
+
+<code>cgroup_init();</code> 先跳过去<br><br>
+
+<code>cpuset_init();</code> 不太明白干什么的, register_filesystem(&cpuset_fs_type); number_of_cpusets = 1; 先跳过去吧.<br><br>
+
+<code>taskstats_init_early();</code> taskstats_cache = KMEM_CACHE(taskstats); 然后在每个cpu上初始化listener_array.taskstats看起来是用来统计每个task的运行数据的.top命令用的数据是不是来自这里?? <br><br>
+
+<code>delayacct_init();</code>
+<pre><code class="language-c">delayacct_cache = KMEM_CACHE(task_delay_info);
+delay_acct_tsk_init(&init_task);
+    init_task->delays = kmem_cache_zalloc(delayacct_cache, GFP_KERNEL);
+</code></pre>
+
+<code>check_bugs();</code>
+<pre><code class="language-c">identify_boot_cpu();
+    // 重新补充cpu各方面的信息
+    select_idle_routine();
+    // 这个比较有意思: 正常情况下,cpu是要执行指令的,并且一秒钟可以执行很多很多,这也就是平时说的cpu速度,但是当电脑开机后,也不运行什么别的程序,不能让cpu满负荷的运行呀,那多浪费电呀
+    // 这就是idle进程的用处,当没有进程要运行的时候,就让idle运行,那这个idle进程怎么写呢? @see arch/x86/kernel/process.c#0375
+    //   方法1: cpu_relax(); => rep; nop  // 这个方法还是在不停的执行指令,前边我们计算BogoMIPS就是执行的这个指令
+    //   方法2: safe_halt(); => sti; hlt  // x86_64的kernel不会使用方法1,最差也是用这个方法
+    /* @see AMD-Volumne3
+        HLT causes the microprocessor to halt instruction execution and enter the HALT state. Entering the HALT state puts the processor in low-power mode.
+        Execution resumes when an unmasked hardware interrupt (INTR), non-maskable interrupt (NMI), system management interrupt (SMI), RESET, or INIT occurs.
+    */
+    // 方法3: mwait_idle(); => monitor %eax, %ecx, %edx; mwait %eax, %ecx; // @see AMD-Volumne3 MONITOR/MWAIT 这个是最优选的方法
+    // 方法4: c1e_idle(); // 这个貌似和amd的cpu有关,先跳过去吧
+    在bochs里就是用的mwait.
+    init_c1e_mask(); // 由于没有使用c1e_idle,这个方法什么也没做就返回了
+    vgetcpu_set_mode(); => vgetcpu_mode = VGETCPU_RDTSCP;
+
+alternative_instructions(); // 没太看明白,看起来是判断是机器是只有一个cpu还是有多个,如果只有一个,就切换到UP code上.
+</code></pre>
+
+<code>acpi_early_init();</code>
+<pre><code class="language-c">打印出 Core revision 20110316
+acpi_strict = 0, acpi_gbl_enable_interpreter_slack = TRUE;
+
+dmi_check_system(dsdt_dmi_table); // 如果在这个table里,需要把DSDT copy到内存里
+/* DSDT
+    DSDT stands for Differentiated System Description Table. It Is a major ACPI table and is used to describe what peripherals the machine has.
+    Also holds information on PCI IRQ mappings and power management. For example when powering down by the OS, it should find the _S5 object which describes how to do that.
+*/
+
+acpi_reallocate_root_table(); // 在setup_arch时,我们知道bochs的ACPI有5个table(DSDT,FACS,FACP,APIC,SSDT),需要内存5*32=160,这里扩大4个table,大小为9*32=288
+                              // 分配好内存后,把原来的5个table copy过来
+
+acpi_initialize_subsystem();
+acpi_load_tables();
+acpi_enable_subsystem(); // 还得找点ACPI的参考资料才能弄明白这是在干什么!!!
+</code></pre>
+
+<code>sfi_init_late();</code> sfi_disabled = 1; <br><br>
+
+<code>ftrace_init();</code> 先跳过去.<br><br>
+
+
+</div>
+<script src="prism.js"></script>
+</body>
+</html>

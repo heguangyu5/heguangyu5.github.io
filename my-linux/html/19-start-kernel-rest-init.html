@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">start_kernel: rest_init</h1>
+
+<code>rest_init();</code>
+<pre><code class="language-c">// @see Linux Kernel Development Page 62: Preemption and Context Switching
+每个task的thread_info.flags的第4位,是need_resched标记位,这个bit为1,表示需要切换到另一个task执行了.
+函数 _cond_resched() 检查need_resched标记位,如果为1并且thread_info.preempt_count != PREEMPT_ACTIVE(0x10000000),那就执行切换.
+切换前先将preempt_count += PREEMPT_ACTIVE, 切换后再 -= PREEMPT_ACTIVE
+
+struct completion {
+    unsigned int done;
+    wait_queue_head_t wait = {
+        spinlock_t lock;
+        struct list_head task_list;
+    }
+}
+
+wait_for_completion(struct completion *x); => wait_for_common(x, MAX_SCHEDULE_TIMEOUT, TASK_UNINTERRUPTIBLE);
+// 调用wait_for_completion会将当前task加到x->wait->task_list里,然后调用schedule()切换到另一task执行,并且当前task->state = TASK_UNINTERRUPTIBLE
+// 也就是说,除非状态发生改变,再也不会执行了
+
+complete(struct completion *x);
+// 调用complete将x->done++,然后将x->wait->task_list里的第一个task放到runqueue里, 当wakeup的task继续wait_for_completion的代码执行时,发现x->done为true,
+// 然后就不再切换到其它task,接着执行,把自身从x->wait里删掉,x->done--,返回.
+
+
+rest_init()创建两个task(kernel thread),一个是kernel_init,一个是kthreadd(short for kernal thread daemon???)
+kthreadd就做一件事,轮到它执行时,它就检查kthread_create_list是否为空,如果为空,则调用schedule()切换到另一task执行,否则就从list里取一个创建一个kernel thread.
+kernel_init应该是会向kthread_create_list里加任务,它要依赖kthreadd来做事,但kernel_init又必须先于kthreadd创建,因为它想取得pid=1,所以就用了上边说的completion
+
+reset_init()首先创建kernel_init thread,创建完成后,有可能kernel_init先执行,如果真的是这种情况,kernel_init开头的wait_for_completion()会强制切换到另一个task.
+当前系统就两个task,一个是rest_init(注释称其为root_thread),一个是刚刚创建的kernel_init,这样wait_for_completion保证了kernel_init先创建,取得pid 1之后,reset_init()继续执行
+接着reset_init()创建kthreadd,完成后就有3个task了. 这3个task中,kernel_init肯定不会继续执行,因为它wait着呢,rest_init和kthreadd谁先执行,那不好说,也无所谓.
+不管怎样,rest_init()都会有机会执行到,因为刚开始kthread_create_list是空的,即使kthreadd先执行了,它发现list为空,就切换到rest_init了
+
+complete(&kthreadd_done); // 这个函数调用后,kernel_init就可以继续执行了
+
+init_idle_bootup_task(current); // init_task->sched_class = &idle_sched_class;
+preempt_enable_no_resched(); // .config 里没有定义 CONFIG_PREEMPT,所以这句不产生任何实际指令
+schedule(); // 切换到另一task执行,此时极有可能是 kernel_init, 因为 kthreadd 之前处于 TASK_INTERRUPTIBLE 状态
+preempt_disable(); // 同上,不产生任何实际指令
+
+cpu_idle(); // idle的方法前边已经知道了,就是mwait_idle
+
+
+copy_process()
+    // 前边 security_init() 时,将security_ops设为default_security_ops.
+    security_task_create => security_ops->task_create() => cap_task_create(); => 始终返回0
+
+    dup_task_struct(current);
+        int node = tsk_fork_get_node(orig); // 如果是从kthreadd上fork,那么取kthreadd->pref_node_fork,否则返回 numa_node_id(); 我们只有一个dummy node,所以没区别
+        prepare_to_copy(orig); => unlazy_fpu(); // 和fpu有关,先跳过去
+
+        struct task_struct *tsk = alloc_task_struct_node(node); // 从slab task_struct_cachep中取一个出来, @see fork_init()
+        struct thread_info *ti = alloc_thread_info_node(tsk, node); // 用page allocator从free_area order 1里分配出一块内存出来(8K),我们知道thread_info还要用做stack
+        arch_dup_task_struct(tsk, orig); // 就是直接的copy: *tsk = *orig; 如果和fpu相关,也要把fpu的东西copy一下
+        tsk->stack = ti;
+        prop_local_init_single(&tsk->dirties); // 不清楚有什么用
+        setup_thread_stack(tsk, orig); // 把orig的stack原样copy过来,然后只修改一个地方,把thread_info里原来指向orig的task指针指向新的tsk
+        clear_user_return_notifier(tsk); // thread_info.flags里置TIF_USER_RETURN_NOTIFY标记为0
+        clear_tsk_need_resched(tsk); // thread_info.flags里置TIF_NEED_RESCHED标记为0,我们知道有这个标记意味着要切换到别的task上去,但这个task是新创建的,我们希望它立即执行
+        unsigned long *stackend = end_of_stack(tsk);
+        *stackend = STACK_END_MAGIC; // 所谓的stackend就是thread_info后边紧跟着的那8个字节. 注意指针+1很多情况下不是加1个字节
+            /*   ________________  <-- stack top
+                |                |
+                |                |
+                |                | <-- %rsp
+                |________________| <-- this is stackend
+                |  thread_info   | <-- tsk->stack
+             */
+        // 到现在为止,新的tsk的内容和原来的一模一样,只有thread_info里的task指针指向了新的tsk地址
+        tsk->stack_canary = get_random_int(); // 不清楚有什么用
+        atomic_set(&tsk->usage,2); // 注释里写的很清楚:  One for us, one for whoever does the "release_task()" (usually parent)
+                                   // 显然是tsk结束时-1,parent处理过后再-1,为0时就可以free掉了
+        account_kernel_stack(ti, 1); // 看起来是一个counter,记录着当前zone里已经有多少个kernel stack了. 由于kernel stack必须是连续的2个page,并且起点必须在8K的倍数上(align),这是紧俏资源
+
+        接下来检查下当前用户创建的进程数是否超出限制了. 如果超出限制了,就free掉刚刚dup出来的task_struct,然后返回
+
+        copy_creds(p, clone_flags); // tsk->cred看起来是和用户相关的,目前来说,主要用处是记录process数量. init_task的cred是root_user.
+
+        接下来判断threads的数量是否超出max_threads,这个主要是限制root用户的,max_threads是在fork_init()时根据可用内存大小计算出来的.普通用户的限制刚刚已经做过检查了.
+
+        再接下来是一堆的初始化工作.
+
+        sched_fork(p, clone_flags); // 主要是计算vruntime
+            p->se.vruntime = 0;
+            p->state = TASK_RUNNING;
+            if (!rt_prio(p->prio)) { // 一个进程的priority从0-139,rt priority从0-99,SCHED_NORMAL/SCHED_BATCH tasks的priority从100-139, @see sched_init()
+                p->sched_class = &fair_sched_class;
+            }
+            p->sched_class->task_fork(p); => task_fork_fair();
+                // 把p->se.vruntime = curr->vruntime; 不太明白
+                if (sysctl_sched_child_runs_first && curr && entity_before(curr, se)) {
+                    swap(curr->vruntime, se->vruntime)
+                    resched_task(rq->curr); // 把rq->curr task设上TIF_NEED_RESCHED标记,这样接下来全调用schedule切换到child上
+                                            // 在这里看不出来怎么能够把task放到别的cpu上执行
+                }
+            set_task_cpu(p, cpu);
+
+        接下来就是根据传进来的flag copy关联的东西了.看下我们关心的几个:
+        copy_files(clone_flags, p); // 如果指明了 CLONE_FILES, 那么仅仅是把parent task的files->count++,这应该就是多线程程序共享files的情况,否则的话,就把task->files copy一份出来
+        copy_fs(clone_flags, p);
+        copy_mm(clone_flags, p);
+        ...
+
+        pid = alloc_pid(p->nsproxy->pid_ns);
+        p->pid = pid_nr(pid);
+        p->tgid = p->pid;
+        if (clone_flags & CLONE_THREAD) p->tgid = current->tgid;
+
+        p->pdeath_signal = 0;
+        p->exit_state = 0;
+
+        nr_threads++;
+        total_forks++;
+
+
+after copy_process: wake_up_new_task(p, clone_flags);
+    p->state = TASK_WAKING;
+
+    cpu = select_task_rq(rq, p, SD_BALANCE_FORK, 0);
+        cpu = p->sched_class->select_task_rq(rq, p, sd_flags, wake_flags); => 找出来一个cpu,准备让这个task运行在它上边,多cpu切换使用在这里发生
+    set_task_cpu(p, cpu);
+
+    p->state = TASK_RUNNING;
+    activate_task(rq, p, 0);
+        enqueue_task(rq, p, flags);
+        inc_nr_running(rq);
+
+wake_up_new_task看起来只是把task放到了runqueue里,但并没有看到有调用schedule. 这也就是常说的fork之后不能确定是child先运行还是parent先运行???
+
+
+// =============================================================
+
+rcu_scheduler_starting();
+    rcu_scheduler_active = 1;
+
+kernel_thread(kernel_init, NULL, CLONE_FS | CLONE_SIGHAND);
+    struct pt_regs {
+        unsigned long r15;
+        unsigned long r14;
+        unsigned long r13;
+        unsigned long r12;
+        unsigned long bp;
+        unsigned long bx;
+        /* arguments: non interrupts/non tracing syscalls only save up to here*/
+        unsigned long r11;
+        unsigned long r10;
+        unsigned long r9;
+        unsigned long r8;
+        unsigned long ax;
+        unsigned long cx;
+        unsigned long dx;
+        unsigned long si;
+        unsigned long di;
+        unsigned long orig_ax;
+        /* end of arguments */
+        /* cpu exception frame or undefined */
+        unsigned long ip;
+        unsigned long cs;
+        unsigned long flags;
+        unsigned long sp;
+        unsigned long ss;
+        /* top of stack page */
+    };
+
+    regs.si = kernel_init;
+    regs.di = NULL;
+    regs.ss = __KERNEL_DS;
+    regs.orig_ax = -1;
+    regs.ip = (unsigned long) kernel_thread_helper;
+    regs.cs = __KERNEL_CS | get_kernel_rpl();
+    regs.flags = X86_EFLAGS_IF | 0x2;
+
+    do_fork(
+        clone_flags = CLONE_FS | CLONE_SIGHAND | CLONE_VM | CLONE_UNTRACED,
+        stack_start = 0,
+        regs = &amp;regs,
+        stack_size = 0,
+        parent_tidptr = NULL,
+        child_tidptr = NULL
+    );
+    // 为什么regs.cs & 3 就能判断出是user_mode还是kernel mode?
+    // kernel_thread里在调用do_fork前 regs.cs = __KERNEL_CS | get_kernel_rpl(); 原本 __KERNEL_CS = 0x00af9a000000ffff, 但get_kernel_rpl() = 0, 所以低32位全为0了,那么&3如果为0,就是kernel mode了
+        struct task_struct *p = copy_process(
+            clone_flags = CLONE_FS | CLONE_SIGHAND | CLONE_VM | CLONE_UNTRACED,,
+            stack_start = 0,
+            regs = &amp;regs,
+            stack_size = 0,
+            child_tidptr = NULL,
+            NULL,
+            trace = 0
+        );
+</code></pre>
+
+
+<code>kernel_init();</code>
+<pre><code class="language-c">set_mems_allowed(nodemask); => current->mems_allowed = nodemask; // 可以控制task能使用的内存范围,不过对我们没多大用处,我们只有一个dummy node
+set_cpus_allowed_ptr(current, cpu_all_mask); // init can run on any cpu.
+
+// SMP的东西先跳过去
+smp_prepare_cpus(setup_max_cpus); // arch/x86/kernel/smpboot.c#1018
+do_pre_smp_initcalls();
+lockup_detector_init();
+smp_init(); // Called by boot processor to activate the rest.
+sched_init_smp();
+
+/*
+ * Ok, the machine is now initialized. None of the devices
+ * have been touched yet, but the CPU subsystem is up and
+ * running, and memory and process management works.
+ *
+ * Now we can finally start doing some real work..
+ */
+do_basic_setup();
+    cpuset_init_smp();
+    usermodehelper_init();
+    init_tmpfs();
+        bdi_init(&shmem_backing_dev_info);
+        init_nodecache(); => shmem_inode_cachep = kmem_cache_create("shmem_inode_cache", sizeof(struct shmem_inode_info), ...);
+        register_filesystem(&tmpfs_fs_type);
+        shm_mnt = vfs_kern_mount(&tmpfs_fs_type, MS_NOUSER, "tmpfs", NULL);
+    driver_init();
+        devtmpfs_init();
+            register_filesystem(&dev_fs_type);
+            dev_mnt = kern_mount_data(&dev_fs_type, options = "mode=0755");
+        devices_init();
+        buses_init();
+        classes_init();
+        firmware_init();
+        hypervisor_init();
+        platform_bus_init();
+        system_bus_init();
+        cpu_dev_init();
+        memory_dev_init();
+    init_irq_proc();
+        root_irq_dir = proc_mkdir("irq", NULL); // /proc/ireq
+        register_irq_proc(irq, desc);
+    do_ctors();
+        // __ctors_start = __ctors_end =  0x1b49780, 没有ctor_fn
+    do_initcalls();
+        // __early_initcall_end = 0x1b87570, __initcall_end = 0x1b88428, 有471个initcall???
+        init_mmap_min_addr(); => mmap_min_addr = 0x10000 = 64K
+        ...
+        net_ns_init()
+        e820_mark_nvs_memory()
+        ...
+
+/*
+这471个initcall里有一个叫populate_rootfs,前边我们知道,rest_init所在的task(应该叫task 0吧?)在mnt_init的最后,注册并mount了rootfs,
+并且创建了一个mnt_namespace,把mount的rootfs做为它的root. rest_init执行到最后成了idle task.
+当前我们所在的这个kernel_init是从rest_init fork出来的一个kernel thread (task 1), fork时的clone flags = CLONE_FS | CLONE_SIGHAND | CLONE_VM | CLONE_UNTRACED
+CLONE_FS, CLONE_VM, 并且没有指明CLONE_NEWNS, 所以kernel_init的mnt_namespace及fs都和rest_init一样.
+rootfs其实就是个ramfs,区别在于rootfs在mount时多了一个flag MS_NOUSER.
+populate_rootfs一开始尝试把__initramfs_start开始的内存数据unpack到rootfs,如果unpack出错的话,那就挂掉了
+__initramfs_start部分的数据是编译内核里生成的,我们来看下它里边都是什么内容
+
+关于initramfs是cpio格式的,参考资料:
+https://people.freebsd.org/~kientzle/libarchive/man/cpio.5.txt New ASCII Format
+https://wiki.gentoo.org/wiki/Custom_Initramfs
+*/
+
+我们写个小程序打印出来cpio格式的文件的内容:
+bochs: writemem "/tmp/initramfs.memdump" 0xFFFFFFFF81B88468 0x200 (kernel里的initramfs大小是0x200)
+./print_cpio /tmp/initramfs.memdump
+sizeof(struct cpio_newc_header) = 110
+dev         => Empty    magic: 070701, ino: 721, mode: 40755, uid: 0, gid: 0, nlink: 2, mtime = 1444483864, filesize = 0, devmajor: 3, devminor = 1, rdevmajor = 0, rdevminor = 0,
+                        namesize = 4    // (mode: 40000(dir) +　755)
+dev/console => Empty    magic: 070701, ino: 722, mode: 20600, uid: 0, gid: 0, nlink: 1, mtime = 1444483864, filesize = 0, devmajor: 3, devminor = 1, rdevmajor = 5, rdevminor = 1,
+                        namesize = 12   // (mode: 20000(char device) + 600)
+root        => Empty    magic: 070701, ino: 723, mode: 40700, uid: 0, gid: 0, nlink: 2, mtime = 1444483864, filesize = 0, devmajor: 3, devminor = 1, rdevmajor = 0, rdevminor = 0,
+                        namesize = 5    // (mode: 40000(dir) + 700)
+
+TRAILER!!!
+
+/*
+前边我们制作initrd时简单的dd了一个500K的文件,显然这不是一个能用的initrd.有了wiki.gentoo.org的参考,我们这里制作一个能用的initrd.
+
+之前我们在做config里,把ext2编译是module了,并没有编译到kernel里,现在重新make menuconfig一下,把ext2选上,其它的几个文件系统ext3,ext4,xfs什么的都去掉.
+因为经测试,ext4的disk bochs启动有问题. 当然disk也要重新制作了.
+./build-disk.sh
+
+从busybox的网站上下载回来源码,执行make menuconfig,加上static build,去掉networking(不然编译失败),然后执行make编译,最后得到可执行文件busybox
+制作cpio image并把它copy到my-linux.img的工作执行下边的脚本就好了
+./build-initrd-img.sh
+现在重新启动bochs.(注意:由于initrd.img.gz的大小变了,我们之前追踪bochs执行过程时记录的内存地址现在可能就不一样了)
+
+populate_rootfs在unpack initramfs成功后,由于我们加载了initrd,所以接着会把initrd也unpack到rootfs里.然后initrd就没用了,它占用的内存就可以free掉了.
+下边我们重点看看unpack_to_rootfs的实现.
+*/
+unpack_to_rootfs(char *buf, unsigned len); // break point 0x1ae5a0c
+    // 这个函数一开始就先分配了三块内存分别用于 header, symlink 和 name, 我们已经知道sizeof(header)=110,所以一下子好理解多了
+    // 紧接着一个while循环处理两种情况: 一种是没有压缩的initramfs,一种是压缩过的initramfs.
+    // 对应我们的情况,前者是编译到kernel自身的__initramfs_start开始的512字节的数据,后者是包含着busybox的initrd.img.gz
+    // 我们也知道,cpio的开头是header.magic="070701",而压缩文件的开头不是"0",并且cpio会把文件名和文件内容对齐的4字节,所以第一个if判断
+    if (*buf == '0' && !(this_header & 3))
+    // 找到了cpio里一个文件的开头,而第二个if判断
+    if (!*buf)
+    // 则是跳过去pad的0字节
+    // 所以现在的关键就在write_buffer的实现了上,显然每次调用write_buffer都处理了一个文件
+    write_buffer(char *buf, unsigned len);
+    // write_buffer先解析header,根据mode判断这是个symlink还是个regular file,如果是regular file或者文件大小为0,则GotName
+    // 我们的情况,第一个是dev目录,filesize=0,所以GotName.
+    // GotName如果发现name是"TRAILER!!!",那就结束了
+    // GotName的第一步是先查找一下,看取得的这个目录或文件是不是已经存在了,如果是,则删除之,这就涉及到了文件路径查找的问题
+    /*
+        UnderStandingKernel Chapter 12 有讲Pathname Lookup, 值得一看
+
+        路径查找最终落到了 path_lookupat() 方法上.
+        static int path_lookupat(int dfd, const char *name, unsigned int flags, struct nameidata *nd);
+        查找过程中的中间数据和最终结果保存在参数nd里.
+        path_init(dfd, name, flags | LOOKUP_PARENT, nd, &base);
+        path_init的主要作用是初始化nd. 
+            - 如果name以"/"开头,也就是绝对路径查找,那么nd->path = nd->root = current->fs->root;
+            - 如果name不以"/"开头,并且dfd=AT_FDCWD指明了要在当前目录查找,那么nd->path = current->fs->pwd;
+            - 代码里还有另外一种情况,不清楚什么时间会用上
+            最后, nd->inode = nd->path.dentry->d_inode;
+        link_path_walk(name, nd);
+        link_path_walk从路径中取一段出来,一个字符一个字符的计算hash值,如果发现当前处理的这一段是最后一段了,那就直接返回.
+        如果不是最后一段,则调用walk_component找到这一段对应的inode,因为这不是路径的最后一段,所以它应该是个目录(inode应该有lookup方法).
+        然后按上边的步骤接着处理下一段.
+        理解异常情况会非常有助于代码的理解, 举例:
+            /bin/ls/home/user/.profile这不是一个有效的路径,当处理到ls时,期望它是个目录,但实际上它是个文件,对应的inode没有lookup方法,此时应该返回出错信息-ENOTDIR
+        link_path_walk如果走的正常的话,那么现在nd里的inode应该指向路径里倒数第二段的位置,以 /home/user/Downloads/a.rar为例,当前nd应该指向Downloads.
+        接着就执行lookup_last了, lookup_last又一次调用walk_component,找到最后一段的inode,然后返回. 路径查找到此就结束了.
+        这里要特别注意,如果查找时flags里指明了要LOOKUP_PARENT,那么就不执行lookup_last了.此时就返回了倒数第二段的path.
+        所以关键的逻辑在walk_component里.
+        walk_component调用do_lookup完成查找工作. do_lookup首先在dentry_hashtable里查找对应的dentry,如果找到了,就返回dentry,否则返回NULL
+        Q: 一个path是由vfsmount和dentry确定的,我们之前就有疑问,一个新mount的文件系统知道自己的parent,但是parent怎么知道这是个挂载点呢?
+        A: 一个dentry当作mountpoint时,会在dentry->d_flags里设上标记 DCACHE_MOUNTED.
+        Q: 由于一个挂载点上可以mount好几个文件系统,当找到这个dentry时,选哪个文件系统作为这个dentry的文件系统呢?
+        A: 遍历已经挂载的文件系统,找到第一个或最后一个 mnt_parent 是 dentry 所在的并且 mountpoint是dentry的
+        OK, do_lookup找到的dentry如果是一个mountpoint的话,更改path指向新文件系统的root.
+        上边在dentry_hashtable里查找时,使用的是RCU查找,如果找不到,不用RCU再尝试找一下,很可能还是找不到.如果真的找不到,那就先根据name alloc出来一个dentry,
+        然后调用parent inode的lookup方法把inode找出来.当然如果文件或目录确实不存在的话,还是会查找失败的.不过这个时间的dentry信息也是有用的了.
+        这种情况由于是调用inode的lookup方法,所以不会有mountpoint这种情况.
+
+        清楚了路径查找,接下来看几个syscall.
+        sys_rmdir(const char *pathname); // fs/namei.c#2738
+            do_rmdir调用user_path_parent查找path,user_path_parent查找时会指定LOOKUP_PARENT flag,所以如果rmdir("/tmp/mydir/")的话,这里返回的是tmp的path.
+            然后调用lookup_hash找到mydir的dentry. 这里需要注意的是, 虽然调用 lookup_hash(&nd); 传的是nd参数,但其实并没有更改nd.
+            所以接下来 vfs_rmdir(nd.path.dentry->d_inode, dentry) 的第一个参数是tmp的inode,第二个参数是mydir的dentry.
+            vfs_rmdir最终调用dir->i_op->rmdir执行删除操作
+        sys_mkdir(const char *pathname, int mode); // fs/namei.c#2626
+            首先也是调用user_path_parent查找path,我们还以/tmp/mydir/为例,返回tmp的path
+            然后调用lookup_create()在tmp里查找mydir的dentry,如果找不到,就新alloc一个. 注意这里仅仅alloc了dentry,dentry.d_node = NULL
+            接着调用vfs_mkdir(tmp inode, mydir dentry), vfs_mkdir调用dir->i_op->mkdir执行最终的mkdir操作
+        sys_open(const char filename, int flags, int mode); // fs/open.c#1015
+            sys_open实际调用的是do_sys_open.
+            do_sys_open调用get_unused_fd_flags,也就是alloc_fd得到当前task的下一个可用fd. alloc_fd的逻辑值得看一下.
+                alloc_fd(unsigned start, unsigned flags);
+                我们先来回顾下files_struct的数据结构:
+                struct files_struct {
+                    struct fdtable *fdt;
+                    struct fdtable fdtab;
+                    int next_fd;
+                    struct file *fd_array[NR_OPEN_DEFAULT];
+                    struct embedded_fd_set(u64) close_on_exec_init;
+                    struct embedded_fd_set(u64) open_fds_init;
+                }
+                struct fdtable {
+                    unsigned int max_fds;
+                    struct file **fd;
+                    struct fdtable *next;
+                    fd_set *close_on_exec;
+                    fd_set *open_fds;
+                }
+                // 刚开始时, files.fdt 指向 files.fdtab, 而files.fdtab.fd指向files.fd_array
+                fdtable的next属性是比较迷惑人的,实际上这个属性现在已经不用了.
+                如果task open的fd不够NR_OPEN_DEFAULT=64个,那就不需要expand_fdtable,如果多了,不是再alloc一个fdtable,然后和原来的fdtable串成单链表.
+                而是加大新alloc的fdtable的大小,把原来的fdtable里的数据copy到新的里边去.
+            找到fd后,调用do_filp_open得到一个struct file *f; 再调用fd_install(fd, f)把file *f指令加到files.fdt.fd[fd]里
+            do_flip_open(int dfd, const char *pathname, const struct open_flags *op, int flags);
+                do_filp_open调用path_openat, path_openat首先从filp_cachep slab里取一个空的struct file,然后调用path_init,link_path_walk找到倒数第二段的dentry.
+                然后把刚刚取得的struct file放到nd里,调用do_last()初始化好struct file.
+                do_last分两种情况: 一种是要open的文件不存在,调用vfs_create,也就是dir->i_op->create创建文件. 另一种是文件已存在,再次调用walk_component就找到了dentry.
+                最后调用namedata_to_filp完成struct file的初始化.
+        上边的3个调用最终都落到文件系统的i_op->rmdir, i_op->mkdir, i_op->create上.我们以ramfs为例看看它们的实现.
+        ramfs_create(struct inode *dir, struct dentry *dentry, int mode, struct nameidata *nd) => ramfs_mknod(dir, dentry, mode | S_IFREG, 0);
+        ramfs_mknod调用ramfs_get_inode取得一个inode,然后加到dentry里.
+        ramfs_mkdir和ramfs_create差不多,只不过创建的inode的i_op, i_fop指向的operation struct不同罢了.
+        ramfs的rmdir就是simple_rmdir,其实就是把dentry和inode对应的reference count数减少就返回了.
+    */
+    // 知道了sys_rmdir, sys_mkdir, sys_open, initramfs的逻辑看起来就简单了.
+    // 在GotName后, 如果是dir,就sys_mkdir,如果是regular file,就sys_open,如果文件内容不为空,则sys_write,如果是block/char device,则sys_mknod
+    // 前边到现在我们一直说的是从header里边根据mode判断是regular file或dir的情况,如果是symlink的话,则sys_symlink
+
+
+sys_open(filename = "/dev/console", flags = O_RDWR, mode = 0) // stdin
+sys_dup(0); // stdout
+sys_dup(0); // stderr
+
+ramdisk_execute_command = NULL => "/init"
+sys_access(ramdisk_execute_command, 0); // @see fs/open.c#0369 man access
+
+/*
+ * Ok, we have completed the initial bootup, and
+ * we're essentially up and running. Get rid of the
+ * initmem segments and start the user-mode stuff..
+ */
+init_post();
+</code></pre>
+
+</div>
+<script src="prism.js"></script>
+</body>
+</html>
