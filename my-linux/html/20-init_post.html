@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">init_post</h1>
+
+<pre><code class="language-c">
+// @see Linux Kernel Development chapter 15: The Process Address Space
+// @see UnderStandingKernel chapter 9: Process Address Space
+
+struct task_struct {
+    // ...
+    struct mm_struct *mm, *active_mm;
+    // ...
+}
+
+当一个task被调度执行时, task->mm loaded, then task->active_mm = task->mm;
+kernel thread的task->mm = NULL, 当kernel thread被调度执行时,不load mm,而是保持之前的adress space不变,然后 task->active_mm = prev_task->mm;
+
+struct mm_struct {
+    struct list_head mmlist; // 所有task的mm连成一个链表
+    atomic_t mm_users;       // 有几个task在用这个mm_struct
+    atomic_t mm_count;       // 当一个task结束时,exit_mm()调用mmput(),mm_users--,当mm_users为0时,调用mmdrop(),mm_count--,
+                             // 当mm_count为0时,free_mm()把这个mm_struct退回给mm_cachep slab cache.
+                             // 所以mm_count正常情况下为1,当kernel也要用这个mm_struct时,mm_count就大于1了
+                             // UnderStandingKernel讲的比较清楚: mm_struct原本归属的process算mm_count=1,如果这个mm_count被kernel thread用了,
+                             // 那么mm_count=2,如果kernel_thread用的过程中,原来的process结束了,此时mm_count=1,kernel thread可以接着用,
+                             // kernel thread也用完了,这个mm_struct才算没用了
+
+    u64 start_code, end_code;
+    u64 start_data, end_data;
+    u64 start_brk, brk;
+    u64 start_stack;
+    u64 arg_start, arg_end;
+    u64 env_start, env_end;  // 一个task占有的内存都在这了
+
+    u64 rss;        // pages allocated
+    u64 total_vm;   // total number of pages 这两个待弄清楚
+
+    pgd_t *pgd; // 这个就是用来切换address space的吧
+
+    struct vm_area_struct *mmap; // mm由vm_area组成
+    int map_count;               // 有多少个vm_area
+    struct rb_root mm_rb;        // vm_area组成的rb_tree
+}
+
+struct vm_area_struct {
+    struct mm_struct *vm_mm;        // 这个area是哪个mm_struct的
+    struct vm_area_struct *vm_next; // 对应mm_struct里的mmap,组成了一个单链表
+    struct rb_node vm_rb;           // 对应mm_struct里的mm_rb,组成了一个rb_tree
+
+    u64 vm_start;
+    u64 vm_end;
+    pgprot_t vm_page_prot;
+    u64 vm_flags;               // 这个area的地址范围和权限
+
+    struct vm_operations_struct *vm_ops; // 操作
+}
+
+struct vm_operations_struct {
+    void (*open)(struct vm_area_struct *);  // 当这个area加到一个address space里时调用open
+    void (*close)(struct vm_area_struct *); // 当这个area从一个address space里移除时调用close
+    int (*falut)(struct vm_area_struct *, struct vm_fault *);
+    *page_mkwrite
+    *access
+};
+
+
+怎么创建一个vm_area_struct,然后把它加到mm_struct里?
+
+u64 do_mmap(struct *file, u64 addr, u64 len, u64 prot, u64 flag, u64 offset);
+// file可以为NULL,offset可以为0,这种情况叫anonymous mapping. 否则叫 file-backed mapping.
+
+一个task调用do_mmap后,它的mm_struct里就多了一个(或者extend了现有的一个)vm_area.
+user space调用mmap2(), mmap()
+
+
+总结下 Process Address Space:
+一个task本身(text,data,bss,...)以及它要申请使用的内存(heap, mmap, malloc)其实都是在操作vm_area,和物理内存没有实际关系.
+当task的代码真的要访问内存时,由于page table里没有,就page fault了,kernel根据fault的地址可以判断出是在vm_area里,还是在vm_area外.
+如果在vm_area里,那就分配物理内存,接着执行task代码,否则,那就给进程发信息SIGSEGV,接着进程就segmentation falut了.
+
+
+再来看下 Documentation/x86/x86_64/mm.txt
+
+0000000000000000 - 00007fffffffffff (=47 bits) user space, different per mm hole caused by [48:63] sign extension
+ffff800000000000 - ffff80ffffffffff (=40 bits) guard hole
+ffff880000000000 - ffffc7ffffffffff (=64 TB) direct mapping of all phys. memory
+ffffc80000000000 - ffffc8ffffffffff (=40 bits) hole
+ffffc90000000000 - ffffe8ffffffffff (=45 bits) vmalloc/ioremap space
+ffffe90000000000 - ffffe9ffffffffff (=40 bits) hole
+ffffea0000000000 - ffffeaffffffffff (=40 bits) virtual memory map (1TB)
+... unused hole ...
+ffffffff80000000 - ffffffffa0000000 (=512 MB)  kernel text mapping, from phys 0
+ffffffffa0000000 - fffffffffff00000 (=1536 MB) module mapping space
+
+到目前为止,我们知道
+
+ffffffff80000000 - ffffffffa0000000 (=512 MB) kernel
+ffff880000000000 - ffffc7ffffffffff (=64 TB)  direct mapping
+ffffea0000000000 - ffffeaffffffffff (=1TB)    virtual memory map // 存放struct page, sizeof (struct page) = 56, 1TB/56*4K=73TB
+
+四级的page table, pgd里一个slot map着 4K * 512 (2M) * 512 (1G) * 512 = 512GB 内存, 四级page table总共能map 512G * 512 = 256TB 内存
+</code></pre>
+
+<pre><code class="language-c">async_synchronize_full();
+free_initmem();
+mark_rodata_ro();
+system_state = SYSTEM_RUNNING;
+
+current->signal->flags |= SIGNAL_UNKILLABLE;
+
+run_init_process(ramdisk_execute_command); // ramdisk_execute_command = "/init"
+    init_filename = "/init";
+    argv_init = {"/init"};
+    envp_init = {"HOME=/", "TERM=linux", "BOOT_IMAGE=/bzImage"};
+    kernel_execve(init_filename, argv_init, envp_init);
+    // man execve, man execl
+    // 可以看到平时在c程序里调用的exec functions最终都调用的是execve. execve对应着系统调用stub_execve
+    // stub_execve最终调用了sys_execve, kernel_execve最终也是调用sys_execve
+</code></pre>
+
+<code>sys_execve(char *name, char *argv, char *envp, struct pt_regs *regs);</code> => <code>do_execve(filename, argv, envp, regs);</code>
+<pre><code class="language-c">struct files_struct *displaced;
+unshare_files(&displaced); // 把当前task.files copy一份出来替换掉当前的,原来的files保存在displaced里.
+                           // 当do_execve结束时,会把displaced这个files_struct的引用计数-1,如果减到0了,就free掉
+                           // init_post现在还是一个kernel thread,它的files用的是init_task的
+                           // unshare_files调用unshare_fd完成copy工作,unshare_fd把files_struct完整copy了一份
+                           // 这里比较有意思的是,如果task A调用execve执行了task B, A中open的file的B中还会保留.
+                           // tools里的两个小程序 test-execve-fd 和 continue-read 验证了这一情况
+接下来新分配一个linux_binprm并做了一系列权限检查.然后open了file.
+struct file *file = open_exec(filename); // open_exec调用do_filp_open打开了filename,然后检查此文件是否是regular file,或者mountpoint是否要求NOEXEC
+                                         // deny_write_access的逻辑是这样的: 一个可执行文件如果正在修改过程中,那么它是不可执行的的
+                                         // inode.i_writecount这样来计数,每当打开这个文件来执行时,检查下writecount是否大于0,是的话说明有其它进程正在写,当前不可执行.
+                                         // 如果没有其它进程在写,那就把writecount减1. 我们来猜测一下,当打开一个文件写的时候,也会检查一下writecount,如果小于0,说明正在执行中,不可写,否则就把writecount加1
+                                         // 可以写个小程序验证一下,这个小程序就是简单的sleep 10秒,在sleep时调用echo写这个文件,此时就会报Text file busy.
+
+sched_exec(); // sched部分还不是很明白,sched_exec的作用就是尽可能地把当前这个task转到另一个cpu上执行
+
+bprm->file     = file;
+bprm->filename = filename;
+bprm->interp   = filename;
+
+bprm_mm_init(bprm);
+    bprm->mm = mm_alloc(); // mm_alloc分配并简单地初始化了一个mm_struct,并调用mm_alloc_pgd分配了一个pgd
+                           // 新分配的这个pgd的初始化是在pgd_ctor()里完成的,其实就是个简单的copy,把init_level4_pgt从272项开始全都copy过来.
+                           // 这里也可以看出,每新创建一个进程,都要使用一个page做pgd,kernel自身使用的其它pagetable(pud,pmd,pte)都会和进程共享.
+    __bprm_mm_init(bprm); // 初始化一个vma做为stack,大小为一个page. vm_end = STACK_TOP_MAX = TASK_SIZE_MAX = 1 &lt;&lt; 47 - PAGE_SIZE
+        mm->stack_vm = mm->total_vm = 1;
+        bprm->p = vm_end - sizeof(void *);
+
+bprm->argc = count(argv...);
+bprm->envc = count(envp...);
+
+prepare_binprm(bprm); // uid,gid等权限检查,然后调用kernel_read读取file的前128字节到bprm->buf里.
+
+/* 我们打印下bprm看看
+// bochs: writemem "/tmp/bprm.memdump" 0xFFFF88000642F000 0xf0
+./print_bprm /tmp/bprm.memdump
+argc = 1, argv = 3
+current top of mem = 0x7fffffffeff8
+mm = 0xffff880006446000
+
+// bochs writemem "/tmp/mm.memdump" 0xffff880006446000 0x350
+./print_mm /tmp/mm.memdump
+pgd = 0xffff88000642e000
+分析一下这个pgd.
+272 - 0x1a04000  // kenel idt map
+402 - 0x7437000
+465 - 0x6b22000
+468 - 0x7be7000 // section mem map
+511 - 0x1a05000 // kernel map
+*/
+
+copy_strings_kernel(1, &bprm->filename, bprm); // 上边我们知道当前的stack top = 0x7fffffffeff8, 这里把filename copy到stack里
+                                               // 上边分配了一个vma做为stack,大小是一个page,但实际上并没有map物理内存,这里copy_strings时把物理内存给map上了
+                                               // calc-pgt计算可知 pgd(255) -> pud(511) -> pmd(511) -> pte(510)
+                                               // 最终找到stack的这个page在0x19ff000, bochs里view memory 可以看到, 在 0x19fff2处, 是 "/init"
+
+bprm->exec = bprm->p;
+copy_strings(bprm->envc, envp, bprm);
+copy_strings(bprm->argc, argv, bprm); // 把envp和argv都copy到stack上去.
+
+// copy_strings值得一看,由于stack是从高地址向低地址的,而平时访问内存是从低地址向高地址的,所以要把envp和argv copy到stack上,要倒过来copy.
+// 倒的方法也挺简单的,就是 argv + argc,然后循环着把argc--,每次计算argv[argc]字串的长度,把栈指针下移这么多,然后copy就好了.
+
+OK, 现在我们知道一个进程的开头一点的内存布局了.
+/*
+ __________     0x7fffffffffff
+|          |    0x7fffffffeff8 (stack top)
+|          |    filename
+|          |    envp[N]
+|          |    envp[...]
+|          |    envp[1]
+|          |    envp[0]
+|          |    argv[N]
+|          |    argv[...]
+|          |    argv[1]
+|          |    argv[0]
+*/
+
+再理一下 struct linux_binprm {
+    struct file *file;                  // 调用open_exec打开的可执行文件
+    char buf[BINPRM_BUF_SIZE = 128];    // prepare_binprm时读取file的前128字节
+
+    struct mm_struct *mm;               // bprm_mm_init时分配的,新程序的pagetable也是在这里分配并初始化的. 注意pagetable虽然有了,但是并没有使用呢.
+    struct vm_area_struct *vma;         // 当前指向stack,默认大小是1个page,如果argv,envp比较大,可能会再分配
+    u64 vma_pages;
+
+    u64 p; // 指向栈底
+
+    int argc, envc; // argv, envp参数个数
+
+    char *filename; // 可执行文件的名字
+    char *interp;   // 可执行文件的名字
+
+    int recursion_depth; // script嵌套调用不能太深,这个值记录着嵌套几次了
+}
+
+
+search_binary_handler(bprm,regs); // break point 0x1166247
+    // kernel支持的binfmt都注册在链表 formats (0x1a3c490) 里.
+    struct linux_binfmt {
+        struct list_head lh;
+        struct module *module;
+        int (*load_binary)(struct linux_binfmt *, struct pt_regs *regs);
+        int (*load_shlib)(struct *file);
+        int (*core_dump)(struct coredump_params *cprm);
+        u64 min_coredump;
+    }
+    // 我们看下当前都注册了哪些binfmt
+    0x1a47bc0 (compat_elf_format)   fs/compat_binfmt_elf.c
+    0x1a47b80 (elf_format)          fs/binfmt_elf.c
+    0x1a47b40 (script_format)       fs/binfmt_script.c
+    // search_binary_handler 遍历 formats, 调用其load_binary方法,如果返回值大于0,则认为load成功,然后会把file inode.i_writecount加1,
+    // binfmt_script的load方法看起来简单一些,先看这个
+    load_script(struct linux_binfmt *bprm, struct pt_regs *regs);
+        // script有两个限制: 1) 文件内容以#!开头 2) #!后边使用的interpreter可以还是script,但嵌套不能太多
+        // 它会把inode.i_writecount加1,所以即使script正在执行中,也可以修改
+        bprm->file = NULL; // 知道这是个script之后,文件的其它内容就不关心了
+        // load_script分析文件内容的第一行,找到interpreter和optional args.
+        // 分析的过程其实是这样的:
+        &lt;?php
+            $line1 = trim(substr($line1, 2));
+            $line1 = explode(" \t", $line1);
+            $i_name = array_shift($line1);
+            $i_arg  = implode(" ", $line1);
+        ?&gt;
+        // 接下来把args和interperter加到栈里,对于init来说,现在栈的情况是这样的
+        /*
+            "/init"                 (filename)
+            "BOOT_IMAGE=/bzImage"
+            "TERM=linux"
+            "HOME=/"                (envp)
+            "/init"
+            "/bin/sh"               (argv) // bin/sh没有其它参数了
+        */
+        bprm->interp = "/bin/sh";
+        file = open_exec("/bin/sh");
+        bprm->file = file;
+        prepare_binprm(bprm);  // 读取/bin/sh的前128字节
+        search_binary_handler(bprm, regs);
+        // 最终还是要调用二进制的可执行文件
+    load_elf_binary(struct linux_binprm *bprm, struct pt_regs *regs);
+    /*
+        man elf
+        @see http://www.sco.com/developers/gabi/latest/contents.html
+        @see http://www.x86-64.org/documentation/abi.pdf
+        @see https://www.technovelty.org/linux/plt-and-got-the-key-to-code-sharing-and-dynamic-libraries.html
+
+        一个elf文件由4部分组成, ELF header, program header table, section header table, 其它
+        文件开头就是ELF header, e_ehsize记录着ELF header的长度, e_phoff记录着program header table的位置, e_shoff记录着section header table的位置
+        这两个table里每一项的大小都是固定的,分别用e_phentsize,e_shentsize表示,每个table里条目的数量用e_phnum和e_shnum表示
+        e_entry记录着程序执行的入口,e_type记录着这是个可执行文件,还是个shared object,e_machine记录着这个文件能在哪个架构下执行,比如x86_64
+        section header table里的每一项都有一个名称,这个名称存储在一个section里,e_shstrndx记录着这个section在table中的位置.
+
+        program header entry的p_offset记录着这个segment在文件中的位置,p_filesz记录着这个segment的大小.
+        p_type记录着此segment的类型,如果是PT_LOAD,p_memsz记录着当把这个segment load到内存时占的大小, p_vaddr记录着加载到内存时虚拟地址是多少.
+        p_flags记录着这个segment的读写执行权限.
+
+        section header table的sh_offset记录着这个section在文件中的位置, sh_size记录着这个section的大小.
+        sh_type记录着此section的类型, sh_name记录着section的名称.
+    */
+        上边了解了elf之后,我们知道elf64 header的大小是64字节,我们已经读取了文件的前128字节,因此已经拿到了完整的header.
+        load_elf_binary首先通过检验header来确认这是一个elf格式的文件.
+        然后根据 e_phnum 和 sizeof(struct elf_phdr) 计算出 program_header_table 的大小,并把这个table从文件读取到内存里.
+        接下来先过一遍table找出PT_INTERP,再过第二遍找出PT_GNU_STACK.先看PT_INTERP.
+        上边我们已经知道PT_INTERP segment里其实就一个文件路径,对普通的可执行文件来说,就是"/lib64/ld-linux-x86-64.so.2".
+        struct file *interpreter = open_exec("/lib64/ld-linux-x86-64.so.2");
+        拿到file后,读取它的前128字节并转成elf64 header. 应该下边就用上了.
+        不过当前执行的是busybox的bash程序,busybox是静态编译的,所以没有PT_INTERP.
+        再看PT_GNU_STACK,如果这个header里明确说了stack是可执行的,那么executable_stack = EXSTACK_ENABLE_X, 否则, executable_stack = EXSTACK_DISABLE_X;
+
+        flush_old_exec(bprm);
+            bprm->mm->exec_file = bprm->file;
+            current->mm = bprm->mm;
+            activate_mm(); // load mm->pgd to CR3, now use the new pagetable
+            arch_pick_mmap_layout();
+                // mmap_is_legacy()追踪bochs执行得到以下结果
+                //    current->personality & ADDR_COMPAT_LAYOUT = 0
+                //    rlimit stack = 0x800000 = 8M
+                //    sysctl_legacy_va_layout = 0
+                // 最终 mmap_is_legacy() 返回 0
+                mm->mmap_base = mmap_base();
+                    MIN_GAP = 0x8000000 = 128M
+                    TASK_SIZE = 0x7ffffffff000
+                    mmap_base = TASK_SIZE - MIN_GAP = 0x7ffff7fff000
+                    // UnderStandingKernel Chapter 20: Program Execution Flexible memory region layout 有讲这个mmap_base
+                    // 不过它说的是x86的,user address space共有3G空间,在classical layout里,1G以下用作code,data,bss,heap,1G以上用作mapping,这样heap的大小肯定是小于1G的
+                    // flexible layout的话,stack限制一个大小,比如128M,余下的空间给heap和mapping共用,heap从低地址向高地址增长,mapping从高地址向低地址走.
+                mm->get_unmapped_area = arch_get_unmapped_area_topdown;
+                mm->unmap_area = arch_unmap_area_topdown;
+            bprm->mm = NULL;
+
+        setup_new_exec(bprm);
+            current->comm = "/init";
+            current->mm->task_size = TASK_SIZE = 0x7ffffffff000
+            flush_signal_handlers();
+            flush_old_files(current->files); // 前边我们知道exec出来的task完全copy了原来的files,在这里把close_on_exec里的fd都关闭了
+
+        setup_arg_pages(...);
+        current->mm->start_stack = bprm->p; // 原来的stack的virt addr是固定的,setup_arg_pages之后,stack addr就变成一个随机的了
+                                            // shift_arg_pages的注释里写的清楚一些,刚开始的地址固定的stack是临时的,当stack确定下来后,就要使用新的stack
+                                            // 由于stack的地址变了,pagetable要修改一下
+                                            // 在最开始的时候,__bprm_mm_init分配了1个page大小的vma,后来不知道在哪个地方又加了1个page,在这里又硬编码的把stack的vma加了32个page,
+                                            // 最终现在的stack有0x22=34个page,不过实际使用的物理内存只有一个page.
+                                            // print_mm也可以看到total_vm=0x22, stack_vm=0x22, nr_ptes=0x1
+
+        接下来再过一遍program header table,找出来PT_LOAD segments,调用elf_map把vma做好.这个循环结束后,code,data,bss,brk都知道了.
+        这里需要注意的是,elf_map时是按p_filesz做的map,如果p_memsz > p_filesz,那么多出来的就是bss,这一块是没做map的.
+        所以接下来的set_brk()检查这一情况,如果有bss,就把map补上.
+        // 我们编译的busybox有两个PT_LOAD
+        // 第1个p_vaddr=0x400000,filesz=memsz=0x238 pages, 权限是RX,显然是busybox的.text
+        // 第2个p_vaddr=0x837ee0,filesz=0x1c57, memsz = 0x77a8, 权限是RW,显然这是busybox的.data,memsz多出来的是.bss, 大小是 0x5b51
+        // 在做map里,第1个好说,vma从0x400000到0x638000,
+        //      print_mm可以看到 total_vm=0x25a, shared_vm=0x238, exec_vm=0x238,stack_vm=0x22
+        // 第二个在map .data时,虽然2个page就够了,但由于p_vaddr起始值不在page boundary上,所以需要3个page,从0x837000到0x83a000,
+        //      print_mm可以看到 total_vm=0x25d, shared_vm=0x23b, exec_vm=0x238,stack_vm=0x22
+        // bss从0x837ee0 + 0x1c57 = 0x839b37 到 0x839b37 + 0x5b51 = 0x83f688, vma显然要从0x839000-0x840000,共7个page,不过这个范围和上边的.data的vma在0x839000这个page上是重的,
+        //      print_mm可以看到 total_vm=0x263, shared_vm=0x23b, exec_vm=0x238,stack_vm=0x22,只多了6个page,不是7个
+        // 查看mm->mmap链表可以看到,第一个vma从0x400000-0x638000,第二个vma从0x837000-0x83a000,第三个从0x83a000到0x8400000
+        // 最终 mm->start_brk = brk = 0x840000
+        上边在map .data时,最后一个page 0x839000既包含了一部分.data,也包含了一部分.bss,由于这个page是map在.data的vma里的,
+        当用到这块数据时,会从文件里把整个这4K读出来,显然.bss对应的那部分数据是不应该有的,所以set_brk之后,会检查这种情况,并把bss对应的那一部分内存给清0.
+        清0的这个操作一执行,由于pagetable还没有,会page_fault,然后kernel会把pagetable建好,把file里的这个page给读取到内存里,接下来清0就能正常执行了.
+        // print_mm会看到nr_ptes=2,查看pgd会看到0x839000这个page的map已经做好了
+
+        如果有PT_INTERP的话(很多情况下会有的,因为多数程序都不是静态编译的),就调用load_elf_interp().
+
+        set_binfmt(&elf_format);
+            current->mm->binfmt = &elf_format;
+
+        arch_setup_additional_pages(bprm, !!elf_interpreter);
+            // @see http://man7.org/linux/man-pages/man7/vdso.7.html
+            // vdso在arch/x86/vdso/vdso.so,编译时直接编译进bzImage了.
+            // 在init_vdso_vars里,kernel分配出一块大小为vdso.so大小的内存,然后把vdso.so全部copy过去,这些pages保存在变量vdso_pages里.
+            // bochs查看vdso_size = 0x1000, vdso_pages = 0x740c528 => 0xffffea000019d620
+            // 之前我们知道0xffffea....这个address space就是用来存储struct pages的,一个struct page大小是0x38字节, 0x19d620/0x38=0x761c,这是pfn,对应的物理内存是0x761c000
+            // bochs里一查,果然是.
+            // 接下来的VEXTERN(x)看的不是很明白,但应该是修改vdso.so里的symbol的地址.
+            arch_setup_additional_pages在比stack更高的地址范围内找一块,分配一个vma给vdso.
+            接下来的install_special_mapping把这个vma加到mm里.
+            // 注意,虽然vdso已经在内存里了,但是这个时间点并没有做pagetable map,vdso所在的pages被存储到了vma->vm_private_data里,
+            // 当page_fault时,调用special_mapping_vmops.special_mapping_fault找到vdso的page.
+            我们已经知道vdso_size=0x1000,所以新加的这个vma使得mm->total_vm=0x264. (多了1个page)
+
+        create_elf_tables(bprm, &loc->elf_ex, load_addr, interp_load_addr);
+            create_elf_tables首先再次调整stack的地址,然后把platform的字符串(我们的情况是x86_64)copy到stack上
+            这个copy会导致page fault,从而新加了一个pte
+            接下来产生一个16字节的随机内容,也copy到stack上
+            再然后填充current->mm->auxv,auxv是个u64的数组,读取/proc/PID/auxv就能看到数组内容
+            接下来把argc,argv,envp,elf_info(auxv) copy到stack上.
+            // 这里要区别的是: 前边刚开始的stack里边存放着argv,envp的字符串,这里的argv,envp存放的是指针.也就是说到这里,才形成了c语言的main函数的参数
+            int main(int argc, char *argv[], char *envp[]);
+            /* 现在的stack布局是这样的
+                 __________
+                |          |    0x7fffXXXXXXXX (stack top)
+                |          |    filename    string
+                |          |    envp[N]     string
+                |          |    envp[...]   string
+                |          |    envp[1]     string
+                |          |    envp[0]     string
+                |          |    argv[N]     string
+                |          |    argv[...]   string
+                |          |    argv[1]     string
+                |          |    argv[0]     string
+                ...
+                |          |    platform string (x86_64)
+                |          |    random bytes (16字节)
+                |          |    elf_info
+                |          |    ...
+                |          |    elf_info
+                |          |    envp[LAST]  NULL
+                |          |    envp[N]     ptr
+                |          |    ...
+                |          |    envp[0]     ptr
+                |          |    argv[LAST]  NULL
+                |          |    argv[N]     ptr
+                |          |    ...
+                |          |    argv[0]     ptr
+                |          |    argc
+            */
+
+        更新current->mm的start_code,end_code,start_data,end_data....等
+
+        arch_random_brk(current->mm); // 原来的brk是根据.data和.bss计算出来的,这里弄一个随机的brk
+
+        ELF_PLAT_INIT(regs, reloc_func_desc);
+
+        start_thread(regs, elf_entry, bprm->p);
+
+acct_update_integrals(current);
+free_bprm(bprm);
+</code></pre>
+
+回过头来说kernel_execve, kernel_execve调用sys_execve返回后,判断返回值,如果为0,则跳到int_ret_from_sys_call执行.<br>
+int_ret_from_sys_call接着跳到retint_swapgs执行, reint_swapgs又跳到restore_args执行.<br>
+关键在最后一句 iret. 我们看下现在的stack:
+<pre>
+0x513ee8        // busybox entry point
+0x33            // CS
+0x200           // eflags (IF=1,DF=1)
+0x7fff0ab60670  // stack top
+0x2b            // SS
+</pre>
+iret之后,要执行0x513ee8处的指令,我们知道还没有做pagetable的map,所以就page fault了,kernel处理完page fault后,回来继续执行.
+
+
+</div>
+<script src="prism.js"></script>
+</body>
+</html>
