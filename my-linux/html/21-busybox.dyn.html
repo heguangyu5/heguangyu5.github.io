@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">busybox.dyn</h1>
+
+之前我们使用的busybox是静态编译的,在init_post里我们跳过了interpreter的部分.这里补回来.<br><br>
+
+
+再次编译一个busybox,这次不勾选static build.<br><br>
+
+怎么查看一个可执行文件依赖的类库呢? 我们之前写了个print_elf64的小程序,用来打印出来可执行文件的信息.<br>
+
+program_header_table里的PT_INTERP指定的 /lib64/ld-linux-x86-64.so.2 肯定是需要的.<br>
+其它依赖的类库都在PT_DYNAMIC里,d_tag为DT_NEEDED的,其d_un的值指向了DT_STRTAB的index.<br>
+@see http://www.sco.com/developers/gabi/latest/ch5.dynamic.html<br>
+如果DT_NEEDED的路径不是绝对路径,其查找有4种方法:<br>
+1. DT_RPATH (没有DT_RUNPATH的情况下)<br>
+2. LD_LIBRARY_PATH<br>
+3. DT_RUNPATH<br>
+4. /usr/lib或者其它指定的<br>
+
+<pre><code class="language-bash">./print_elf64 ../busybox.dyn
+Program header table:
+       0: type = PT_PHDR         RX        offset = 0x40 size = 504
+       1: type = PT_INTERP       R        offset = 0x238 size = 28
+                /lib64/ld-linux-x86-64.so.2
+       2: type = PT_LOAD         RX        offset = 0 size = 654780 p_vaddr = 0x400000 p_memsz = 0x9fdbc
+       3: type = PT_LOAD         RW        offset = 0x9fe10 size = 3807 p_vaddr = 0x69fe10 p_memsz = 0x3370
+       4: type = PT_DYNAMIC      RW        offset = 0x9fe38 size = 416
+                d_tag = DT_NEEDED            d_un = 0x1
+                d_tag = DT_NEEDED            d_un = 0x49
+                d_tag = DT_INIT              d_un = 0x405458
+                d_tag = DT_FINI              d_un = 0x48440c
+                d_tag = unknown              d_un = 0x400298
+                d_tag = DT_STRTAB            d_un = 0x402480
+                d_tag = DT_SYMTAB            d_un = 0x400350
+
+hexdump -C -n 500 -s 0x2480 busybox.dyn
+00002480  00 6c 69 62 6d 2e 73 6f  2e 36 00 5f 5f 67 6d 6f  |.libm.so.6.__gmo|
+00002490  6e 5f 73 74 61 72 74 5f  5f 00 5f 4a 76 5f 52 65  |n_start__._Jv_Re|
+000024a0  67 69 73 74 65 72 43 6c  61 73 73 65 73 00 65 78  |gisterClasses.ex|
+000024b0  70 00 73 69 6e 00 70 6f  77 00 61 74 61 6e 32 00  |p.sin.pow.atan2.|
+000024c0  73 71 72 74 00 63 6f 73  00 6c 69 62 63 2e 73 6f  |sqrt.cos.libc.so|
+000024d0  2e 36 00 73 63 68 65 64  5f 67 65 74 5f 70 72 69  |.6.sched_get_pri|
+000024e0  6f 72 69 74 79 5f 6d 69  6e 00 6b 6c 6f 67 63 74  |ority_min.klogct|
+000024f0  6c 00 73 65 74 75 69 64  00 63 68 72 6f 6f 74 00  |l.setuid.chroot.|
+00002500  73 74 72 63 61 73 65 73  74 72 00 73 6f 63 6b 65  |strcasestr.socke|
+00002510  74 00 70 75 74 63 68 61  72 5f 75 6e 6c 6f 63 6b  |t.putchar_unlock|
+00002520  65 64 00 6d 6b 64 74 65  6d 70 00 67 6c 6f 62 66  |ed.mkdtemp.globf|
+00002530  72 65 65 36 34 00 66 66  6c 75 73 68 00 70 75 74  |ree64.fflush.put|
+00002540  63 5f 75 6e 6c 6f 63 6b  65 64 00 73 74 72 63 70  |c_unlocked.strcp|
+00002550  79 00 73 69 67 73 75 73  70 65 6e 64 00 73 68 6d  |y.sigsuspend.shm|
+00002560  67 65 74 00 67 65 74 68  6f 73 74 69 64 00 67 6d  |get.gethostid.gm|
+00002570  74 69 6d 65 5f 72 00 66  63 68 6d 6f 64 00 5f 5f  |time_r.fchmod.__|
+00002580  70 72 69 6e 74 66 5f 63  68 6b 00 61 63 63 74 00  |printf_chk.acct.|
+00002590  65 78 65 63 6c 00 66 6e  6d 61 74 63 68 00 67 6e  |execl.fnmatch.gn|
+000025a0  75 5f 64 65 76 5f 6d 61  6a 6f 72 00 65 78 65 63  |u_dev_major.exec|
+000025b0  76 00 73 72 61 6e 64 00  74 74 79 6e 61 6d 65 5f  |v.srand.ttyname_|
+000025c0  72 00 73 74 72 73 69 67  6e 61 6c 00 73 74 72 6e  |r.strsignal.strn|
+000025d0  63 6d 70 00 69 6e 65 74  5f 61 74 6f 6e 00 6f 70  |cmp.inet_aton.op|
+000025e0  74 69 6e 64 00 73 74 72  72 63 68 72 00 5f 5f 6c  |tind.strrchr.__l|
+000025f0  6f 6e 67 6a 6d 70 5f 63  68 6b 00 72 65 67 65 78  |ongjmp_chk.regex|
+00002600  65 63 00 70 69 70 65 00  74 63 64 72 61 69 6e 00  |ec.pipe.tcdrain.|
+00002610  63 66 6d 61 6b 65 72 61  77 00 73 68 6d 61 74 00  |cfmakeraw.shmat.|
+00002620  63 6f 6e 6e 65 63 74 00  5f 5f 6f 70 65 6e 36 34  |connect.__open64|
+00002630  5f 32 00 6c 75 74 69 6d  65 73 00 6d 75 6e 6c 6f  |_2.lutimes.munlo|
+00002640  63 6b 00 66 74 72 75 6e  63 61 74 65 36 34 00 6d  |ck.ftruncate64.m|
+00002650  6d 61 70 36 34 00 73 65  6d 63 74 6c 00 63 6c 6f  |map64.semctl.clo|
+00002660  73 65 64 69 72 00 69 6e  65 74 5f 6e 74 6f 61 00  |sedir.inet_ntoa.|
+00002670  67 6c 6f 62                                       |glob|
+00002674
+
+DT_STRTAB + 0x1     = "libm.so.6"
+DT_STRTAB + 0x0x49  = 0x24c9 = "libc.so.6"
+</code></pre><br>
+
+
+我们新写个脚本 build-initrd-img-busybox-dyn.sh 重新制作一个initrd.img.gz<br><br>
+
+<code>load_elf_interp(struct elfhdr *interp_elf_ex, struct file *interpreter, unsigned long *interp_map_addr, unsigned long no_base)</code>
+<pre><code class="language-c">// 在load_elf_interp之前,新的pgd已经load到CR3里了,busybox的code,data,bss都已经好了.
+
+/* ./print_elf64 /lib64/ld-linux-x86-64.so.2 可以看到
+ELF header:
+    header size = 0x40
+    program header table at = 0x40, entry count = 7, entry size = 0x38
+    section header table at = 0x24120, entry count = 24, entry size = 0x40
+    e_entry = 0x16b0
+    e_type  = 0x3 (ET_EXEC = 0x2, ET_DYN = 0x3, ET_CORE = 0x4)
+    e_machine = 0x3e (ET_X86_64 = 0x3e)
+    e_shstrndx = 23
+
+Program header table:
+       0: type = PT_LOAD         RX        offset = 0 size = 138880 p_vaddr = 0 p_memsz = 0x21e80
+       1: type = PT_LOAD         RW        offset = 0x22b70 size = 5320 p_vaddr = 0x222b70 p_memsz = 0x1758
+       2: type = PT_DYNAMIC      RW        offset = 0x22e28 size = 400
+                d_tag = DT_SONAME            d_un = 0x139
+                d_tag = DT_INIT_ARRAY        d_un = 0x222b70
+                d_tag = DT_INIT_ARRAYSZ      d_un = 0x8
+                d_tag = DT_HASH              d_un = 0x1f0
+                d_tag = unknown              d_un = 0x2a8
+                d_tag = DT_STRTAB            d_un = 0x608
+                d_tag = DT_SYMTAB            d_un = 0x380
+                d_tag = DT_STRSZ             d_un = 0x17c
+
+PT_DYNAMIC 的 d_tag = DT_SONAME 指明了这个so文件的名称.
+*/
+
+load_elf_interp先把ld-linux-x86-64.so.2的program header table读取到内存里.
+然后根据PT_LOAD计算出total_mapping_size = 0x222b70 + 0x1758 - 0 = 0x2242c8.
+接下来把PT_LOAD segments都调用elf_map做好map.
+这里的.so做map和前边的busybox做map有一点区别是,第一次做map时,map的地址范围要足够大,这也是要计算total_mapping_size的原因.
+
+map_addr = elf_map(0, total_mapping_size=0x2242c8) = 0x7F566BF12000
+elf_map(map_addr + p_vaddr, 0) = (0x7F566BF12000 + 0x22b70 = 0x7F566C134B70, 0)
+
+其实就是先map一大块,然后后边的从这一块的当中开始map.
+
+接下来一样要padzero bss,把memsz比filesz多出来的部分给做好map.
+
+整理一下当前的vma:
+0x400000-0x4a0000   (busybox.dyn的第一个PT_LOAD .text)
+0x69f000-0x6a1000   (busybox.dyn的第二个PT_LOAD .data和一部分.bss)
+0x6a1000-0x6a4000   (busybox.dyn的.bss)
+0x7f566bf12000-0x7f566bf34000 (ld-linux-x86-64.so.2的第一个PT_LOAD .text)
+0x7f566c134000-0x7f566c137000 (ld-linux-x86-64.so.2的第二个PT_LOAD .data和.bss)
+0x7fff294a4000-0x7fff294c6000 (busybox.dyn的stack)
+
+这里有一点让人不明白,为什么busybox.dyn的.bss要分成两个vma,而ld-linux-x86-64.so.2的一个就行了.
+</code></pre>
+
+load_elf_interp返回了ld-linux-x86-64.so.2的map_addr,再加上ld-linux-x86-64.so.2的e_entry,就定下来了进入user space后第一条要执行的指令了.<br>
+<code>0x7f566bf12000 + 0x16b0 = 0x7f566bf136b0</code><br><br>
+
+接下来要想搞清楚ld-linux-x86-64.so.2是怎么把其它依赖的类库加载进来以及怎么开始执行busybox.dyn的,就要看ld-linux-x86-64.so.2的实现了.<br><br>
+
+/lib64/ld-linux-x86-64.so.2其实就是/lib/x86_64-linux-gnu/ld-2.15.so, <code>dpkg -S ld-2.15.so</code>查找可知, ld-2.15.so是libc6里的.<br>
+<code>apt-get source libc6</code>拿到源码.<br>
+<code>man ld.so</code><br>
+<pre><code class="language-c">// @see http://www.cs.virginia.edu/~dww4s/articles/ld_linux.html
+// ld.so 这个make target定义在 eglibc-2.15/elf/Makefile#418
+// @see https://sourceware.org/glibc/wiki/DynamicLoader
+
+_dl_start的一开始,先得到自身被加载到内存的地址,再加上PT_DYNAMIC的offset,得到PT_DYNAMIC segment的地址.
+然后调用elf_get_dynamic_info()读取PT_DYNAMIC segments的内容,我们在写print_elf64这个小程序时已经读取过.
+glibc的代码太难看了.不看了.
+</code></pre>
+</div>
+<script src="prism.js"></script>
+</body>
+</html>

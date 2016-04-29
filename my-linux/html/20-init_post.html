@@ -432,7 +432,20 @@ int_ret_from_sys_call接着跳到retint_swapgs执行, reint_swapgs又跳到resto
 0x7fff0ab60670  // stack top
 0x2b            // SS
 </pre>
-iret之后,要执行0x513ee8处的指令,我们知道还没有做pagetable的map,所以就page fault了,kernel处理完page fault后,回来继续执行.
+iret之后,要执行0x513ee8处的指令,我们知道还没有做pagetable的map,所以就page fault了,kernel处理完page fault后,回来继续执行.<br><br>
+
+进入bash后,我们看下init进程的maps.
+<pre>
+mount -o proc none /proc
+cat /proc/1/maps
+00400000-00638000                   r-xp 00000000 00:01 4182            /bin/busybox        (busybox的第一个PT_LOAD .text)
+00837000-0083a000                   rw-p 00237000 00:01 4182            /bin/busybox        (busybox的第二个PT_LOAD .data加一部分的.bss)
+0083a000-00840000                   rw-p 00000000 00:00 0                                   (busybox的第二个PT_LOAD的memsz比filesz多出来的部分.bss)
+01508000-0152b000                   rw-p 00000000 00:00 0               [heap]              (brk原本应该在.bss后边,但是arch_random_brk把它给调整了)
+7fff4cb56000-7fff4cb77000           rw-p 00000000 00:00 0               [stack]             (stack top原本应该在0x7fffffffeff8处,经过几次random之后,就成了这个地址了)
+7fff4cbff000-7fff4cc00000           r-xp 00000000 00:00 0               [vdso]              (vdso的地址要stack_top之上,也是个随机地址)
+ffffffffff600000-ffffffffff601000   r-xp 00000000 00:00 0               [vsyscall]          (这个不知道是在哪里map上的)
+</pre>
 
 
 </div>

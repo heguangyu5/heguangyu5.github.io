@@ -18,16 +18,16 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    uint64_t PGDIR = (virt_addr & 0x0000FF8000000000) >> 39;
-    uint64_t PUD   = (virt_addr & 0x0000007FC0000000) >> 30;
-    uint64_t PMD   = (virt_addr & 0x000000003FE00000) >> 21;
-    uint64_t PT    = (virt_addr & 0x00000000001FF000) >> 12;
+    uint16_t PGDIR = (virt_addr & 0x0000FF8000000000) >> 39;
+    uint16_t PUD   = (virt_addr & 0x0000007FC0000000) >> 30;
+    uint16_t PMD   = (virt_addr & 0x000000003FE00000) >> 21;
+    uint16_t PT    = (virt_addr & 0x00000000001FF000) >> 12;
 
     printf("%#lX => %#lX\n", virt_addr, virt_addr & 0x0000FFFFFFFFFFFF);
-    printf("PGDIR = %#lX = %ld\n", PGDIR, PGDIR);
-    printf("PUD   = %#lX = %ld\n", PUD,   PUD);
-    printf("PMD   = %#lX = %ld\n", PMD,   PMD);
-    printf("PT    = %#lX = %ld\n", PT,    PT);
+    printf("PGDIR = %#-5x = %3d = %#x\n", PGDIR, PGDIR, PGDIR * 8);
+    printf("PUD   = %#-5x = %3d = %#x\n", PUD,   PUD,   PUD * 8);
+    printf("PMD   = %#-5x = %3d = %#x\n", PMD,   PMD,   PMD * 8);
+    printf("PT    = %#-5x = %3d = %#x\n", PT,    PT,    PT * 8);
 
     return 0;
 }

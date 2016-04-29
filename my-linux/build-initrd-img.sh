@@ -42,5 +42,6 @@ rm -rf tmp_initrd_dir
 sudo losetup -o $((512*2048)) /dev/loop1 my-linux.img
 sudo mount /dev/loop1 /mnt
 sudo cp busybox.img.gz /mnt/initrd.img.gz
+sync
 sudo umount /mnt/
 sudo losetup -d /dev/loop1
