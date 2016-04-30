@@ -6,6 +6,7 @@ cd tmp_initrd_dir
 mkdir -p bin dev usr/sbin usr/bin sbin proc sys
 cd dev
 sudo mknod tty c 5 0
+sudo mknod tty0 c 4 0
 sudo mknod tty1 c 4 1
 cd ..
 cp ../busybox.dyn ./bin/busybox
