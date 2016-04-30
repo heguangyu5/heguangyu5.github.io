@@ -45,6 +45,7 @@ Program header table:
                 d_tag = DT_STRTAB            d_un = 0x402480
                 d_tag = DT_SYMTAB            d_un = 0x400350
 
+
 hexdump -C -n 500 -s 0x2480 busybox.dyn
 00002480  00 6c 69 62 6d 2e 73 6f  2e 36 00 5f 5f 67 6d 6f  |.libm.so.6.__gmo|
 00002490  6e 5f 73 74 61 72 74 5f  5f 00 5f 4a 76 5f 52 65  |n_start__._Jv_Re|
@@ -113,6 +114,25 @@ Program header table:
                 d_tag = DT_SYMTAB            d_un = 0x380
                 d_tag = DT_STRSZ             d_un = 0x17c
 
+...
+
+GOT:
+0: 0x222e28
+1: 0x224238
+2: 0
+3: 0
+
+GOT.PLT:
+0: 0x222e28
+1: 0
+2: 0
+3: 0xa96
+4: 0xaa6
+5: 0xab6
+6: 0xac6
+7: 0xad6
+8: 0xae6
+
 PT_DYNAMIC 的 d_tag = DT_SONAME 指明了这个so文件的名称.
 */
 
@@ -151,10 +171,460 @@ load_elf_interp返回了ld-linux-x86-64.so.2的map_addr,再加上ld-linux-x86-64
 // ld.so 这个make target定义在 eglibc-2.15/elf/Makefile#418
 // @see https://sourceware.org/glibc/wiki/DynamicLoader
 
-_dl_start的一开始,先得到自身被加载到内存的地址,再加上PT_DYNAMIC的offset,得到PT_DYNAMIC segment的地址.
+_dl_start的一开始,先得到自身被加载到内存的地址,再加上_DYNAMIC的地址,得到PT_DYNAMIC segment的在内存里的实际地址.
+    // x86_64的System V Application Binary Interface里说了,GOT的第一个entry(GOT[0])里保存着Dynamic Section的地址. symbol _DYNAMIC也指向这个地址.
+    // ld-linux-x86-64.so.2的symbol table里没有 _DYNAMIC.
+    // 从上边print_elf64打印出来的信息我们知道,ld-linux-x86-64.so.2的第二个PT_LOAD,也就是.data segment被加载到内存的vaddr offset = 0x222b70, filesz = 5320, 
+    // 所以.data segment在0x222b70 + 5320 = 0x224038处结束. 而 Dynamic Section 的 vaddr = 0x222e28. 在 .data 里.
 然后调用elf_get_dynamic_info()读取PT_DYNAMIC segments的内容,我们在写print_elf64这个小程序时已经读取过.
 glibc的代码太难看了.不看了.
 </code></pre>
+<br><br><br>
+
+@see http://www.airs.com/blog/page/4?s=linkers<br>
+为了更好的理解shared objects,我们分析个小文件看看.
+
+<div class="row">
+    <div class="col-xs-6">
+<pre style="height:450px"><code class="language-c">// a.c
+#include &lt;stdint.h&gt;
+
+uint64_t global1 = 0x11;
+uint64_t global2 = 0x22;
+uint64_t global3 = 0x33;
+
+int sum_global(void)
+{
+    return  global1 + global2 + global3;
+}
+
+int sum_global2(void)
+{
+    return sum_global() + sum_global();
+}
+
+int sum_global4(void)
+{
+    return sum_global2() + sum_global2();
+}
+
+// 编译成a.so 
+// gcc -fpic -shared -nostdlib -o a.so a.c
+</code></pre>
+    </div>
+    <div class="col-xs-6">
+<pre style="height:450px"><code class="language-bash">./print_elf64 a.so
+ELF header:
+    header size = 0x40
+    program header table at = 0x40, entry count = 7, entry size = 0x38
+    section header table at = 0x10f8, entry count = 19, entry size = 0x40
+    e_entry = 0x440
+    e_type  = 0x3 (ET_EXEC = 0x2, ET_DYN = 0x3, ET_CORE = 0x4)
+    e_machine = 0x3e (ET_X86_64 = 0x3e)
+    e_shstrndx = 16
+
+Program header table:
+       0: type = PT_LOAD         RX	offset = 0 size = 1352 p_vaddr = 0 p_memsz = 0x548
+       1: type = PT_LOAD         RW	offset = 0xeb0 size = 376 p_vaddr = 0x200eb0 p_memsz = 0x178
+       2: type = PT_DYNAMIC      RW	offset = 0xeb0 size = 288
+		d_tag = unknown              d_un = 0x1f0
+		d_tag = DT_STRTAB            d_un = 0x340
+		d_tag = DT_SYMTAB            d_un = 0x238
+		d_tag = DT_STRSZ             d_un = 0x4c
+		d_tag = DT_SYMENT            d_un = 0x18
+		d_tag = DT_PLTGOT            d_un = 0x200fe8
+		d_tag = DT_PLTRELSZ          d_un = 0x30
+		d_tag = DT_PLTREL            d_un = 0x7
+		d_tag = DT_JMPREL            d_un = 0x3d8
+		d_tag = DT_RELA              d_un = 0x390
+		d_tag = DT_RELASZ            d_un = 0x48
+		d_tag = DT_RELAENT           d_un = 0x18
+       3: type = PT_NOTE         R	offset = 0x1c8 size = 36
+		name size = 4, desc size = 20, type = 3
+		name: 0x47 (G) 0x4e (N) 0x55 (U) 0
+		desc: 0xf2 0xbd 0x69 0x58 0xd1 0x8f 0x6c 0xc 0x44 0x24 0x4d 0xff 0x2e 0xe4 0xe8 0xe2 0x24 0x3d 0xb 0x16
+       4: type = PT_GNU_EH_FRAME R	offset = 0x4a8 size = 36
+       5: type = PT_GNU_STACK    RW	offset = 0 size = 0
+       6: type = PT_GNU_RELRO    R	offset = 0xeb0 size = 336
+
+Find section name string table:
+    offset = 0x1052, size = 160
+
+Section header table:
+       0: name =                      type = SHT_NULL         offset = 0 size = 0
+       1: name = .note.gnu.build-id   type = SHT_NOTE         offset = 0x1c8 size = 36
+       2: name = .gnu.hash            type = SHT_GNU_HASH     offset = 0x1f0 size = 72
+       3: name = .dynsym              type = SHT_DYNSYM       offset = 0x238 size = 264
+       4: name = .dynstr              type = SHT_STRTAB       offset = 0x340 size = 76
+       5: name = .rela.dyn            type = SHT_RELA         offset = 0x390 size = 72
+		sh_link = .dynsym, sh_info =
+		r_offset = 0x200fd8, r_info = (SYM = 7, TYPE = 0x6), r_addend = 0
+		r_offset = 0x200fe0, r_info = (SYM = 3, TYPE = 0x6), r_addend = 0
+       6: name = .rela.plt            type = SHT_RELA         offset = 0x3d8 size = 48
+		sh_link = .dynsym, sh_info = .plt
+		r_offset = 0x201008, r_info = (SYM = 10, TYPE = 0x7), r_addend = 0
+       7: name = .plt                 type = SHT_PROGBITS     offset = 0x410 size = 48
+       8: name = .text                type = SHT_PROGBITS     offset = 0x440 size = 102
+       9: name = .eh_frame_hdr        type = SHT_PROGBITS     offset = 0x4a8 size = 36
+      10: name = .eh_frame            type = SHT_PROGBITS     offset = 0x4d0 size = 120
+      11: name = .dynamic             type = SHT_DYNAMIC      offset = 0xeb0 size = 288
+      12: name = .got                 type = SHT_PROGBITS     offset = 0xfd0 size = 24
+      13: name = .got.plt             type = SHT_PROGBITS     offset = 0xfe8 size = 40
+      14: name = .data                type = SHT_PROGBITS     offset = 0x1010 size = 24
+      15: name = .comment             type = SHT_PROGBITS     offset = 0x1028 size = 42
+      16: name = .shstrtab            type = SHT_STRTAB       offset = 0x1052 size = 160
+      17: name = .symtab              type = SHT_SYMTAB       offset = 0x15b8 size = 672
+      18: name = .strtab              type = SHT_STRTAB       offset = 0x1858 size = 119
+
+Found symbol table:
+    0: name =                                value = 0          size = 0        type = STT_NOTYPE       binding = STB_LOCAL        defined section index = SHN_UNDEF
+    1: name =                                value = 0x1c8      size = 0        type = STT_SECTION      binding = STB_LOCAL        defined section index = .note.gnu.build-id
+    2: name =                                value = 0x1f0      size = 0        type = STT_SECTION      binding = STB_LOCAL        defined section index = .gnu.hash
+    3: name =                                value = 0x238      size = 0        type = STT_SECTION      binding = STB_LOCAL        defined section index = .dynsym
+    4: name =                                value = 0x340      size = 0        type = STT_SECTION      binding = STB_LOCAL        defined section index = .dynstr
+    5: name =                                value = 0x390      size = 0        type = STT_SECTION      binding = STB_LOCAL        defined section index = .rela.dyn
+    6: name =                                value = 0x3d8      size = 0        type = STT_SECTION      binding = STB_LOCAL        defined section index = .rela.plt
+    7: name =                                value = 0x410      size = 0        type = STT_SECTION      binding = STB_LOCAL        defined section index = .plt
+    8: name =                                value = 0x440      size = 0        type = STT_SECTION      binding = STB_LOCAL        defined section index = .text
+    9: name =                                value = 0x4a8      size = 0        type = STT_SECTION      binding = STB_LOCAL        defined section index = .eh_frame_hdr
+    10: name =                                value = 0x4d0      size = 0        type = STT_SECTION      binding = STB_LOCAL        defined section index = .eh_frame
+    11: name =                                value = 0x200eb0   size = 0        type = STT_SECTION      binding = STB_LOCAL        defined section index = .dynamic
+    12: name =                                value = 0x200fd0   size = 0        type = STT_SECTION      binding = STB_LOCAL        defined section index = .got
+    13: name =                                value = 0x200fe8   size = 0        type = STT_SECTION      binding = STB_LOCAL        defined section index = .got.plt
+    14: name =                                value = 0x201010   size = 0        type = STT_SECTION      binding = STB_LOCAL        defined section index = .data
+    15: name =                                value = 0          size = 0        type = STT_SECTION      binding = STB_LOCAL        defined section index = .comment
+    16: name = a.c                            value = 0          size = 0        type = STT_FILE         binding = STB_LOCAL        defined section index = SHN_ABS
+    17: name = _DYNAMIC                       value = 0x200eb0   size = 0        type = STT_OBJECT       binding = STB_LOCAL        defined section index = SHN_ABS
+    18: name = _GLOBAL_OFFSET_TABLE_          value = 0x200fe8   size = 0        type = STT_OBJECT       binding = STB_LOCAL        defined section index = SHN_ABS
+    19: name = global2                        value = 0x201018   size = 0x8      type = STT_OBJECT       binding = STB_GLOBAL       defined section index = .data
+    20: name = sum_global4                    value = 0x488      size = 0x1e     type = STT_FUNC         binding = STB_GLOBAL       defined section index = .text
+    21: name = sum_global                     value = 0x440      size = 0x2a     type = STT_FUNC         binding = STB_GLOBAL       defined section index = .text
+    22: name = global1                        value = 0x201010   size = 0x8      type = STT_OBJECT       binding = STB_GLOBAL       defined section index = .data
+    23: name = global3                        value = 0x201020   size = 0x8      type = STT_OBJECT       binding = STB_GLOBAL       defined section index = .data
+    24: name = __bss_start                    value = 0x201028   size = 0        type = STT_NOTYPE       binding = STB_GLOBAL       defined section index = SHN_ABS
+    25: name = _edata                         value = 0x201028   size = 0        type = STT_NOTYPE       binding = STB_GLOBAL       defined section index = SHN_ABS
+    26: name = _end                           value = 0x201028   size = 0        type = STT_NOTYPE       binding = STB_GLOBAL       defined section index = SHN_ABS
+    27: name = sum_global2                    value = 0x46a      size = 0x1e     type = STT_FUNC         binding = STB_GLOBAL       defined section index = .text
+
+Found dynamic linking symbol table:
+    0: name =                                value = 0          size = 0        type = STT_NOTYPE       binding = STB_LOCAL        defined section index = SHN_UNDEF
+    1: name =                                value = 0x440      size = 0        type = STT_SECTION      binding = STB_LOCAL        defined section index = .text
+    2: name = sum_global                     value = 0x440      size = 0x2a     type = STT_FUNC         binding = STB_GLOBAL       defined section index = .text
+    3: name = global3                        value = 0x201020   size = 0x8      type = STT_OBJECT       binding = STB_GLOBAL       defined section index = .data
+    4: name = _edata                         value = 0x201028   size = 0        type = STT_NOTYPE       binding = STB_GLOBAL       defined section index = SHN_ABS
+    5: name = _end                           value = 0x201028   size = 0        type = STT_NOTYPE       binding = STB_GLOBAL       defined section index = SHN_ABS
+    6: name = sum_global4                    value = 0x488      size = 0x1e     type = STT_FUNC         binding = STB_GLOBAL       defined section index = .text
+    7: name = global1                        value = 0x201010   size = 0x8      type = STT_OBJECT       binding = STB_GLOBAL       defined section index = .data
+    8: name = __bss_start                    value = 0x201028   size = 0        type = STT_NOTYPE       binding = STB_GLOBAL       defined section index = SHN_ABS
+    9: name = global2                        value = 0x201018   size = 0x8      type = STT_OBJECT       binding = STB_GLOBAL       defined section index = .data
+    10: name = sum_global2                    value = 0x46a      size = 0x1e     type = STT_FUNC         binding = STB_GLOBAL       defined section index = .text
+
+GOT:
+0: 0
+1: 0
+2: 0
+
+GOT.PLT:
+0: 0x200eb0
+1: 0
+2: 0
+3: 0x426
+4: 0x436
+</code></pre>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-xs-6">
+<pre style="height:450px"><code class="language-bash">readelf --relocs a.so
+
+Relocation section '.rela.dyn' at offset 0x390 contains 3 entries:
+  Offset          Info           Type           Sym. Value    Sym. Name + Addend
+000000200fd0  000900000006 R_X86_64_GLOB_DAT 0000000000201018 global2 + 0
+000000200fd8  000700000006 R_X86_64_GLOB_DAT 0000000000201010 global1 + 0
+000000200fe0  000300000006 R_X86_64_GLOB_DAT 0000000000201020 global3 + 0
+
+Relocation section '.rela.plt' at offset 0x3d8 contains 2 entries:
+  Offset          Info           Type           Sym. Value    Sym. Name + Addend
+000000201000  000200000007 R_X86_64_JUMP_SLO 0000000000000440 sum_global + 0
+000000201008  000a00000007 R_X86_64_JUMP_SLO 000000000000046a sum_global2 + 0</code></pre>
+    </div>
+    <div class="col-xs-6">
+<pre style="height:450px"><code class="language-bash">objdump -S a.so
+
+a.so:     file format elf64-x86-64
+
+
+Disassembly of section .plt:
+
+0000000000000410 &lt;sum_global@plt-0x10&gt;:
+ 410:	ff 35 da 0b 20 00    	pushq  0x200bda(%rip)        # 200ff0 &lt;_GLOBAL_OFFSET_TABLE_+0x8&gt;
+ 416:	ff 25 dc 0b 20 00    	jmpq   *0x200bdc(%rip)        # 200ff8 &lt;_GLOBAL_OFFSET_TABLE_+0x10&gt;
+ 41c:	0f 1f 40 00          	nopl   0x0(%rax)
+
+0000000000000420 &lt;sum_global@plt&gt;:
+ 420:	ff 25 da 0b 20 00    	jmpq   *0x200bda(%rip)        # 201000 &lt;_GLOBAL_OFFSET_TABLE_+0x18&gt;
+ 426:	68 00 00 00 00       	pushq  $0x0
+ 42b:	e9 e0 ff ff ff       	jmpq   410 &lt;sum_global@plt-0x10&gt;
+
+0000000000000430 &lt;sum_global2@plt&gt;:
+ 430:	ff 25 d2 0b 20 00    	jmpq   *0x200bd2(%rip)        # 201008 &lt;_GLOBAL_OFFSET_TABLE_+0x20&gt;
+ 436:	68 01 00 00 00       	pushq  $0x1
+ 43b:	e9 d0 ff ff ff       	jmpq   410 &lt;sum_global@plt-0x10&gt;
+
+Disassembly of section .text:
+
+0000000000000440 &lt;sum_global&gt;:
+ 440:	55                   	push   %rbp
+ 441:	48 89 e5             	mov    %rsp,%rbp
+ 444:	48 8b 05 8d 0b 20 00 	mov    0x200b8d(%rip),%rax        # 200fd8 &lt;_DYNAMIC+0x128&gt;
+ 44b:	48 8b 00             	mov    (%rax),%rax
+ 44e:	89 c2                	mov    %eax,%edx
+ 450:	48 8b 05 79 0b 20 00 	mov    0x200b79(%rip),%rax        # 200fd0 &lt;_DYNAMIC+0x120&gt;
+ 457:	48 8b 00             	mov    (%rax),%rax
+ 45a:	01 c2                	add    %eax,%edx
+ 45c:	48 8b 05 7d 0b 20 00 	mov    0x200b7d(%rip),%rax        # 200fe0 &lt;_DYNAMIC+0x130&gt;
+ 463:	48 8b 00             	mov    (%rax),%rax
+ 466:	01 d0                	add    %edx,%eax
+ 468:	5d                   	pop    %rbp
+ 469:	c3                   	retq
+
+000000000000046a &lt;sum_global2&gt;:
+ 46a:	55                   	push   %rbp
+ 46b:	48 89 e5             	mov    %rsp,%rbp
+ 46e:	53                   	push   %rbx
+ 46f:	48 83 ec 08          	sub    $0x8,%rsp
+ 473:	e8 a8 ff ff ff       	callq  420 &lt;sum_global@plt&gt;
+ 478:	89 c3                	mov    %eax,%ebx
+ 47a:	e8 a1 ff ff ff       	callq  420 &lt;sum_global@plt&gt;
+ 47f:	01 d8                	add    %ebx,%eax
+ 481:	48 83 c4 08          	add    $0x8,%rsp
+ 485:	5b                   	pop    %rbx
+ 486:	5d                   	pop    %rbp
+ 487:	c3                   	retq
+
+0000000000000488 &lt;sum_global4&gt;:
+ 488:	55                   	push   %rbp
+ 489:	48 89 e5             	mov    %rsp,%rbp
+ 48c:	53                   	push   %rbx
+ 48d:	48 83 ec 08          	sub    $0x8,%rsp
+ 491:	e8 9a ff ff ff       	callq  430 &lt;sum_global2@plt&gt;
+ 496:	89 c3                	mov    %eax,%ebx
+ 498:	e8 93 ff ff ff       	callq  430 &lt;sum_global2@plt&gt;
+ 49d:	01 d8                	add    %ebx,%eax
+ 49f:	48 83 c4 08          	add    $0x8,%rsp
+ 4a3:	5b                   	pop    %rbx
+ 4a4:	5d                   	pop    %rbp
+ 4a5:	c3                   	retq</code></pre>
+    </div>
+</div>
+
+<br><br>
+
+<pre>
+从print_elf64的结果可以看出,a.so的第二个PT_LOAD在文件中的offset和PT_DYNAMIC的offset是一样的,都是0xeb0,也就是说:
+PT_LOAD的一开始是288字节的dynamic section, 0xeb0 + 288 = 0xfd0.
+.got在文件中的offset就是0xfd0,所以接着下边的数据是.got, .got的大小是24字节, 0xfd0+24=0xfe8.
+.got.plt在文件中的offset是0xfe8,所以再接下来的数据是.got.plt, 它的大小是40字节. 0xfe8+40=0x1010
+.data在文件中的offset是0x1010,大小是24字节, 288 + 24 + 40 + 24 = 376, 正好是PT_LOAD的大小.
+
+ _______________    a.so的第二个PT_LOAD,offset=0xeb0
+|               |
+|               |
+|               |   288字节的PT_DYNAMIC,   end = 0xfd0
+|               |
+|_______________|
+|               |
+|               |   24字节的got,           end = 0xfe8
+|_______________|
+|               |
+|               |   40字节的got.plt,       end = 0x1010
+|_______________|
+|               |
+|               |   24字节的.data
+|_______________|
+
+平时我们接触到C语言的数组时,下标都是要从0开始,没有负数的,实际上也可以是负数,它们都是指针加加减减而已.
+GOT(Global Offset Table)就是个例子.
+
+在abi.pdf里可以看到GOT是这样声明的:
+
+extern Elf64_Addr _GLOBAL_OFFSET_TABLE_ [];
+The symbol _GLOBAL_OFFSET_TABLE_ may reside in the middle of the .got section, allowing both negative and non-negative offsets into the array of addresses.
+
+a.so的例子验证了这一说法: _GLOBAL_OFFSET_TABLE_ = 0x200fe8, 这个位置正好是.got的结束,.got.plt的开始.
+这也说明了.got和.got.plt只不过是把GOT给分成了两块,命了两个名字而已,实际上还是一个GOT. 我们来看下GOT的内容:
+
+GOT[-3] = 0             // fd0
+GOT[-2] = 0             // fd8
+GOT[-1] = 0             // fe0
+GOT[0]  = 0x200eb0      // fe8
+GOT[1]  = 0             // ff0
+GOT[2]  = 0             // ff8
+GOT[3]  = 0x426         // 1000
+GOT[4]  = 0x436         // 1008
+
+abi.pdf里说GOT[0]指向了 dynamic section, 1和2 are reserved.
+
+接下来看一下sum_global的实现:
+
+ 444:	48 8b 05 8d 0b 20 00 	mov    0x200b8d(%rip),%rax        # 200fd8 <_DYNAMIC+0x128>
+ 44b:	48 8b 00             	mov    (%rax),%rax
+ 44e:	89 c2                	mov    %eax,%edx
+ 450:	48 8b 05 79 0b 20 00 	mov    0x200b79(%rip),%rax        # 200fd0 <_DYNAMIC+0x120>
+ 457:	48 8b 00             	mov    (%rax),%rax
+ 45a:	01 c2                	add    %eax,%edx
+ 45c:	48 8b 05 7d 0b 20 00 	mov    0x200b7d(%rip),%rax        # 200fe0 <_DYNAMIC+0x130>
+ 463:	48 8b 00             	mov    (%rax),%rax
+ 466:	01 d0                	add    %edx,%eax
+
+fd0, fd8, fe0分别对应着GOT[-3], GOT[-2], GOT[-1], 汇编代码把GOT[x]指向的内存地址里的内容加和到%eax里,完成了3个global的求和.
+
+这样的话,当a.so加载到内存的时候,GOT[-3,-2,-1]的值要从0修改到0x1010,0x1018,0x1020
+
+这时间看下 .rela.dyn
+
+  Offset         Sym. Value    Sym. Name + Addend
+000000200fd0 0000000000201018 global2 + 0
+000000200fd8 0000000000201010 global1 + 0
+000000200fe0 0000000000201020 global3 + 0
+
+Ok, 这下了明白了,当a.so加载时,啥都不用管,直接读取.rela.dyn的内容,把 load_addr + Offset 处的值修改成 load_addr + Sym. Value, 就可以了.
+
+
+再看下 sum_global2 的实现:
+
+ 473:	e8 a8 ff ff ff       	callq  420 &lt;sum_global@plt&gt;
+ 478:	89 c3                	mov    %eax,%ebx
+ 47a:	e8 a1 ff ff ff       	callq  420 &lt;sum_global@plt&gt;
+ 47f:	01 d8                	add    %ebx,%eax
+
+0000000000000420 &lt;sum_global@plt&gt;:
+ 420:	ff 25 da 0b 20 00    	jmpq   *0x200bda(%rip)        # 201000 &lt;_GLOBAL_OFFSET_TABLE_+0x18&gt;
+ 426:	68 00 00 00 00       	pushq  $0x0
+ 42b:	e9 e0 ff ff ff       	jmpq   410 &lt;sum_global@plt-0x10&gt;
+
+调用sum_global时其实是调用了sum_global@plt,进而跳转到了GOT[3]指向的内存地址执行. GOT[3]现在指向0x426,也就是jmp的下一条指令.
+0x426把0压入栈,然后跳到0x410执行.
+
+0000000000000410 &lt;sum_global@plt-0x10&gt;:
+ 410:	ff 35 da 0b 20 00    	pushq  0x200bda(%rip)        # 200ff0 &lt;_GLOBAL_OFFSET_TABLE_+0x8&gt;
+ 416:	ff 25 dc 0b 20 00    	jmpq   *0x200bdc(%rip)        # 200ff8 &lt;_GLOBAL_OFFSET_TABLE_+0x10&gt;
+ 41c:	0f 1f 40 00          	nopl   0x0(%rax)
+
+0x410把GOT[1]压入栈,然后跳到GOT[2]指向的内存地址执行.相当于调用 GOT[2](GOT[1], 0).
+同样的,调用sum_global2相当于 GOT[2](GOT[1], 1).
+
+现在需要确定的就是GOT[2]和GOT[1]的内容了. 根据之前了解到的信息,应该是要调用 ld-linux-x86-64.so.2 里的某个函数.这个函数的第一个参数是GOT[1],第二个参数是 .real.plt index.
+
+看下.rela.plt:
+
+  Offset          Sym. Value    Sym. Name + Addend
+000000201000  0000000000000440 sum_global + 0
+000000201008  000000000000046a sum_global2 + 0
+
+sum_global定义是0x440处,sum_global2定义在0x46a处,也就是说,
+GOT[2](GOT[1], 0)要把GOT[3]修改为 load_addr + 0x440,
+GOT[2](GOT[1], 1)要把GOT[4]修改为 load_addr + 0x46a,
+这样下次再call sum_global@plt时,直接就跳到了sum_global里开始执行了.(比正常调用函数多了一个jmp指令)
+
+
+顺过来再整理一遍:
+当把代码编译成shared object时,遇到全局变量,就在GOT里预留个位置,并在.rela.dyn里加一条记录,说明要把GOT里预留的这个位置处填上什么值.
+遇到function,也在GOT里预留个位置,并在.rela.plt里加一条记录,说明要把GOT里预留的这个位置处填上什么值,然后再生成对应的一段代码
+jmp *GOT[N]
+push N
+jmp plt_entry
+然后把这段代码里push N的地址填写到GOT[N]里.
+
+程序加载时,kernel加载程序本身,再加载ld-linux-x86-64.so.2,然后转到ld-linux-x86-64.so.2里执行.
+ld-linux-x86-64.so.2把其它.so文件加载进来,并按照.so文件.rela.dyn里说的,修改GOT里全局变量的地址.函数的地址保持不变.
+当程序调用到.so文件里的函数时,还不清楚.写个程序看看.
+
+extern int sum_global(void);
+extern int sum_global2(void);
+extern int sum_global4(void);
+
+#include &lt;stdio.h&gt;
+
+int main(void)
+{
+	printf("%d\n", sum_global() + sum_global2() + sum_global4());
+	return 0;
+}
+
+gcc -fpic -shared -o liba.so a.c
+gcc b.c -L. -la -Wl,-rpath,/tmp/
+./a.out
+
+objdump -S a.out 一看,还是一样的,a.out里调用的sum_global函数都有对应的plt,最后还是调用GOT[2](GOT[1], index)
+
+现在的关键就在于搞清楚GOT[2] GOT[1]了.
+</pre>
+<br><br>
+
+接着看libc.<br>
+<pre><code class="language-c">
+sysdeps/x86_64/dl-machine.h#145     _start
+    movq %rsp, %rdi
+    call _dl_start
+
+elf/rtld.c#367      _dl_start(arg)
+    l_addr = elf_machine_load_address ();
+    l_ld = (void *) bootstrap_map.l_addr + elf_machine_dynamic ();
+    elf_get_dynamic_info (&bootstrap_map, NULL); // elf/dynamic-link.h#104 got PT_DYNAMIC d_tags
+    _dl_start_final(arg, &info);
+
+elf/rtld.c#275      _dl_start_final(arg, &info);
+    /*  Call the OS-dependent function to set up life so we can do things like
+        file access.  It will call `dl_main' (below) to do all the real work
+        of the dynamic linker, and then unwind our frame and run the user
+        entry point on the same stack we entered on.*/
+    _dl_sysdep_start (arg, &dl_main);
+
+elf/dl-sysdep.c#86  _dl_sysdep_start(arg, &dl_main)
+    DL_FIND_ARG_COMPONENTS() // 在栈上找到elf_info,从而拿到了要执行的程序的信息
+    (*dl_main) (phdr, phnum, &user_entry, _dl_auxv); // phdr,phnum是要执行的程序的program header,不是ld.so的
+
+elf/rtld.c#892  dl_main()
+    dl_main过了一遍program header table,记下来各个segment的信息.
+    检查环境变量LD_PRELOAD和文件/etc/ld.so.preload,如果指定了要加载的so文件,就加载
+    // Load all the libraries specified by DT_NEEDED entries
+    _dl_map_object_deps (main_map, preloads, npreloads, mode == trace, 0);
+    // Now we have all the objects loaded.  Relocate them all except for the dynamic linker itself.
+    _dl_relocate_object() // elf/dl-reloc.c#152
+        // Do the actual relocation of the object's GOT and other data.
+        ELF_DYNAMIC_RELOCATE (l, lazy, consider_profiling, skip_ifunc);
+            elf_machine_runtime_setup()
+                /* The GOT entries for functions in the PLT have not yet been filled
+	                 in.  Their initial contents will arrange when called to push an
+	                 offset into the .rel.plt section, push _GLOBAL_OFFSET_TABLE_[1],
+	                 and then jump to _GLOBAL_OFFSET_TABLE_[2].  */
+                  got = (Elf64_Addr *) D_PTR (l, l_info[DT_PLTGOT]);
+                  got[1] = (Elf64_Addr) l;	/* Identify this shared object.  */
+                /* The got[2] entry contains the address of a function which gets
+	                 called to get the addresses of a so far unresolved function and
+	                 jump to it. */
+	           /* This function will get called to fix up the GOT entry indicated by
+	               the offset on the stack, and then jump to the resolved address.  */
+	            got[2] = (Elf64_Addr) &_dl_runtime_resolve;
+	       ELF_DYNAMIC_DO_REL()     => elf_dynamic_do_Rel()
+	       ELF_DYNAMIC_DO_RELA()    => elf_dynamic_do_Rela()
+	            elf_dynamic_do_Rel()
+
+
+OK, 现在搞明白GOT[2](GOT[1], index)里GOT[2]和GOT[1]都是什么了.
+GOT[2] = &_dl_runtime_resolve
+GOT[1] = Identify this shared object.
+</code></pre>
+
+
+<br>
+<br>
+<br>
+<br>
+<br>
+
 </div>
 <script src="prism.js"></script>
 </body>
