@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">关于 pid=1 的init进程</h1>
+
+<pre><code class="language-c">// kernel启动进busybox的shell后,执行ps命令查看当前的进程
+
+/ # ps -o pid,args
+1 {init} /bin/sh /init
+2 [kthreadd]
+3 [ksoftirqd/0]
+4 [kworker/0:0]
+6 [migration/0]
+7 [watchdog/0]
+8 [cpuset]
+9 [khelper]
+10 [netns]
+11 [sync_supers]
+12 [bdi-default]
+13 [kintegrityd]
+14 [kblockd]
+15 [ata_sff]
+16 [khubd]
+17 [md]
+18 [kworker/0:1]
+19 [khungtaskd]
+20 [kswapd0]
+21 [ksmd]
+22 [fsnotify_mark]
+23 [ecryptfs-kthrea]
+24 [crypto]
+
+// 我们知道/bin/sh是个软链接,链接到busybox.
+// include/autoconf.h 里
+#define ENABLE_BUILD_LIBBUSYBOX 0 // 所以busybox的main函数定义在 libbb/appletlib.c#793
+                                  // grep一下发现没有定义SINGLE_APPLET_MAIN
+#define IF_FEATURE_INDIVIDUAL(...)
+#define ENABLE_FEATURE_INDIVIDUAL
+// 所以
+lbb_prepare("busybox" IF_FEATURE_INDIVIDUAL(, argv)); => lbb_prepare("busybox") => applet_name = "busybox"
+applet_name = argv[0] = "/bin/sh";
+applet_name = bb_basename(applet_name) = "sh"; // bb_basename定义在 libbb/get_last_path_component.c 里
+parse_config_file(); // 我们没有 /etc/busybox.conf,所以这个函数什么也不做
+
+run_applet_and_exit(applet_name, argv);
+    int applet = find_applet_by_name(name = "sh");
+        // ./include/applet_tables.h 里
+        #define NUM_APPLETS 303
+        // applet_main定义在include/applet_tables.h里,是一个函数指针数组
+        p = bsearch(name, (void*)(ptrdiff_t)1, ARRAY_SIZE(applet_main), 1, applet_name_compare);
+        return (int)(ptrdiff_t)p - 1;
+        // sh对应的函数是 ash_main
+
+ash_main定义在 shell/ash.c 里, 关于ash的介绍, 参看 https://en.wikipedia.org/wiki/Almquist_shell
+</code></pre>
+<br>
+
+我们自己写个init shell试一下.<br><br>
+
+<code>build-initrd-img-busybox-dyn-with-my-simple-shell.sh</code><br>
+
+先不在my-simple-shell.c里加wait处理,观察下zombie的情况.<br>
+ps显示是用了/proc,所以先把proc给mount上.
+<pre><code class="language-c">/bin/mount -t proc none /proc
+/bin/ps -o pid,stat,comm,args
+// 可以看到, mount是Z状态,ps是R状态
+/bin/ps -o pid,stat,comm,args
+// 可以看到, mount是Z,ps是Z,最后一个ps是R
+</code></pre>
+
+再加上wait看看. 这次就没有zombie了.<br><br>
+
+
+
+<br>
+<br>
+<br>
+<br>
+<br>
+
+</div>
+<script src="prism.js"></script>
+</body>
+</html>
