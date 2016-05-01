@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">task-process-thread-top(virt-res-shr)</h1>
+
+<h3>task</h3>
+kernel能调度执行的最小单位是task. kernel自身是init_task,或者叫pid=0的task.<br>
+一个task使用的内存情况记录在task->mm, mm->mmap记录了task的address space的使用情况, mm->pgd指向了page table, 记录着物理内存的使用情况.<br>
+task->fs记录着task的运行的根目录(root)和当前工作目录(pwd).<br>
+task->files记录着task打开的文件.<br>
+task->nsproxy->mnt_namespace记录着task使用的文件系统信息.<br>
+task->stack记录着task在kernel space运行时使用的栈.它比较特殊,要对齐到8K上.显然这个是硬性限制,知道内存大小后,就能确定下来最多可运行多少个task.(这里先不考虑swap的情况)<br>
+kernel启动到后来时,调用 copy_process(CLONE_FS | CLONE_SIGHAND | CLONE_VM | CLONE_UNTRACED) 将init_task复制出来一份,产生了pid=1的task.<br>
+<span class="text-red">
+    task是有数量限制的,非root每次复制一个task出来后,都会检查是否超出限制,如果超出,那就free掉这个task.然后这个copy process就失败了.<br>
+    整个系统可创建的task数量也是有限制的,这个限制是根据可用内存的量计算出来的. @see fork_init()
+</span><br>
+然后再次调用copy_process,将init_task复制出来第二份,产生了pid=2的task kthreadd.<br>
+init_task会向kthread_create_list里添加任务,而kthreadd会从这个list里取出任务,创建新的task. 像之前ps看到的pid=3,4的应该就是kthreadd创建的.<br>
+pid=1的task就是我们常说的init process,它在最后接手了系统的控制权.
+
+<h3>process</h3>
+当copy_process时,如果没有指明CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND,那么新copy出来的task我们叫它为process.<br>
+没有指明这4个flag的情况下,copy_process在复制出新的task struct后,继续把task->mm, task->fs, task->files, task->sighand都复制出一份.<br>
+
+<h3>thread</h3>
+当copy_process时,如果指明了CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND,那么新copy出来的task我们叫它为thread.<br>
+也就是说,如果几个task共用一份mm,fs,files,sighand,那么就称它们为threads.<br>
+
+<h3>top(virt-res-shr)</h3>
+top命令在软件包procps里,procps还提供了kill,ps,uptime,vmstat等命令.<br>
+在top.c里调用task_show()方法显示出每个进程的信息,task_show的关键在于proc_t这个数据结构.<br>
+proc_t定义在proc/readproc.h里,注释里说的很明白,proc_t里存储的信息都是读取 /proc/#/stat 获得的.<br>
+man proc可以看到 proc/#/stat 定义在 fs/proc/array.c#do_task_stat() 里<br>
+cat /proc/#/stat 出来的信息分别是:
+<pre><code class="language-bash">/bin/cat /proc/1/stat
+1                   pid
+(init)              task->comm
+S                   task->state
+0                   ppid
+0                   pgid
+0                   sid
+0                   tty_nr
+-1                  tty_pgrp
+4202752(0x402100)   task->flags
+158                 min_flt
+612                 cmin_flt
+0                   maj_flt
+0                   cmaj_flt
+2                   utime
+4554                stime
+21                  cutime
+58                  cstime
+20                  priority
+0                   nice
+1                   num_threads
+0                   itrealvalue
+284                 start_time
+4259840(0x410000)   vsize = task_vsize(mm) = PAGE_SIZE * mm->total_vm
+97                  get_mm_rss(mm) = get_mm_counter(mm, MM_FILEPAGES) + get_mm_counter(mm, MM_ANONPAGES)
+                                   = mm->rss_stat.count[MM_FILEPAGES] + mm->rss_stat.count[MM_ANONPAGES]
+1                       rsslim          // man getrlimit, 好像没用了这个字段
+// 下边的又有些对不上,不看了
+
+/bin/cat /proc/1/maps
+address                     perms   offset   dev   inode       pathname
+00400000-00401000           r-xp    00000000 00:01 4354        /init
+00601000-00602000           r--p    00001000 00:01 4354        /init
+00602000-00603000           rw-p    00002000 00:01 4354        /init
+7f24ca190000-7f24ca344000   r-xp    00000000 00:01 4183        /lib/libc.so.6
+7f24ca344000-7f24ca543000   ---p    001b4000 00:01 4183        /lib/libc.so.6
+7f24ca543000-7f24ca547000   r--p    001b3000 00:01 4183        /lib/libc.so.6
+7f24ca547000-7f24ca549000   rw-p    001b7000 00:01 4183        /lib/libc.so.6
+7f24ca549000-7f24ca54e000   rw-p    00000000 00:00 0
+7f24ca54e000-7f24ca570000   r-xp    00000000 00:01 4408        /lib64/ld-linux-x86-64.so.2
+7f24ca769000-7f24ca770000   rw-p    00000000 00:00 0
+7f24ca770000-7f24ca771000   r--p    00022000 00:01 4408        /lib64/ld-linux-x86-64.so.2
+7f24ca771000-7f24ca773000   rw-p    00023000 00:01 4408        /lib64/ld-linux-x86-64.so.2
+7fffe7d73000-7fffe7d94000   rw-p    00000000 00:00 0           [stack]
+7fffe7db8000-7fffe7db9000   r-xp    00000000 00:00 0           [vdso]
+ffffffffff600000-ffffffffff601000 r-xp 00000000 00:00 0     [vsyscall]
+
+计算一下可知,这些maps共有 0x410 个page, 对应着 /proc/1/stat 里的vsize.
+
+
+/bin/cat /proc/1/statm
+1040(0x410) vsize
+97          rss
+77          shared(MM_FILEPAGES)
+1           text
+0           library (unused in Linux 2.6)
+47          data + stack
+0           dirty pages (unused in Linux 2.6)
+
+// @see fs/proc/task_mmu.c#0071
+*shared = get_mm_counter(mm, MM_FILEPAGES);
+*text = (PAGE_ALIGN(mm->end_code) - (mm->start_code & PAGE_MASK)) >> PAGE_SHIFT;
+*data = mm->total_vm - mm->shared_vm;
+*resident = *shared + get_mm_counter(mm, MM_ANONPAGES);
+</code></pre>
+
+
+<br>
+<br>
+<br>
+<br>
+<br>
+
+</div>
+<script src="prism.js"></script>
+</body>
+</html>
