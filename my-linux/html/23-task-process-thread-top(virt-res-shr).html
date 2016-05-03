@@ -36,6 +36,66 @@ pid=1的task就是我们常说的init process,它在最后接手了系统的控�
 <h3>thread</h3>
 当copy_process时,如果指明了CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND,那么新copy出来的task我们叫它为thread.<br>
 也就是说,如果几个task共用一份mm,fs,files,sighand,那么就称它们为threads.<br>
+<code>man pthreads</code><br>
+当前linux的实现是NPTL. 我们用的glibc版本是2.15.<br>
+<code>man 7 futex</code><br>
+<code>man 2 futex</code><br>
+sys_futex定义在 kernel/futex.c#2648 <br>
+kernel在futex的实现上并没有什么锁的概念,你在一个process里告诉kernel在内存地址A上有一个值A',kernel收到请求后,检查一下,如果地址A上的值还是A',那就把这个process挂起,加到一个和地址A关联的wait queue里.<br>
+然后你在另一个process里告诉kernel,把地址A关联的wait queue里的进程,选择几个让它们接着执行.<br>
+具体到pthread mutex, 设A初始值为1.<br>
+mutex_lock时,把A的值减1后,如果发现值为0,那就lock住了,如果值不为0,那就将其设为-1,调用futex挂起.再有其它process也要lock时,同样减1,此时值为-2,再设回-1,也挂起.这里可以看到,mutex的值始终都是-1.<br>
+mutex_unlock时,把A的值加1后,如果发现值为0,那就把值设为1,然后调用futex wakeup其它process.<br><br>
+来看看glibc的实现:
+<pre><code class="language-c">static inline void __generic_mutex_lock (int *mutex)
+{
+    unsigned int v;
+
+    /* Bit 31 was clear, we got the mutex.  (this is the fastpath).  */
+    if (atomic_bit_test_set (mutex, 31) == 0)
+        return;
+
+    atomic_increment (mutex);
+
+    while (1) {
+        if (atomic_bit_test_set (mutex, 31) == 0) {
+            atomic_decrement (mutex);
+            return;
+        }
+
+        /* We have to wait now. First make sure the futex value we are monitoring is truly negative (i.e. locked). */
+        v = *mutex;
+        if (v >= 0)
+            continue;
+
+        lll_futex_wait (mutex, v, LLL_SHARED);
+    }
+}
+
+static inline void __generic_mutex_unlock (int *mutex)
+{
+  /* Adding 0x80000000 to the counter results in 0 if and only if
+     there are not other interested threads - we can return (this is
+     the fastpath).  */
+  if (atomic_add_zero (mutex, 0x80000000))
+    return;
+
+  /* There are other threads waiting for this mutex, wake one of them up.  */
+  lll_futex_wake (mutex, 1, LLL_SHARED);
+}
+
+// mutex的31位标记着是否lock住了.这也是个符号位.也就是说,只要mutex &lt; 0, 那就是lock住了.
+// 模拟执行一下:
+//      thread-1 lock, mutex=0x80000000
+//      thread-2 lock, mutex=0x80000001, futex_wait
+//      thread-3 lock, mutex=0x80000010, futex_wait
+//      thread-1 unlock, mutex=0x10, futex_wake
+//      thread-2 wakeup, mutex=0x80000010, mutex=0x80000001
+//      thread-2 unlock, mutex=0x1, futex_wake
+//      thread-3 wakeup, mutex=0x80000001, mutex=0x80000000
+//      thread-3 unlock, mutex=0
+// 这个实现会导致最多只能有0x7fffffff个thread lock?
+</code></pre>
 
 <h3>top(virt-res-shr)</h3>
 top命令在软件包procps里,procps还提供了kill,ps,uptime,vmstat等命令.<br>
