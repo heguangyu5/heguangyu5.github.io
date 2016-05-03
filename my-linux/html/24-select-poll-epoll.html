@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">select-poll-epoll</h1>
+
+<h3>select</h3>
+sys_select()定义在 fs/select.c#595, 最终调用do_select().<br>
+do_select()循环遍历指定的fd,调用file->f_op->poll()方法获取这个fd的状态,然后加到返回结果里.如果没有fd要返回,就调用poll_schedule_timeout()切换到别的进程执行.<br>
+最终如果有fd加到了返回结果里,或者timeout了,或者有signal_pending,那就跳出循环,返回到user space.<br>
+
+<h3>poll</h3>
+sys_poll()定义在 fs/select.c#914, 最终调用do_poll().<br>
+do_poll()一样遍历pollfd,调用do_pollfd(),进而调用file->f_op->poll()方法获取这个fd的状态.如果没有fd要返回,一样调用poll_schedule_timeout()切换到别的进程执行.<br>
+关于sys_poll()里restart_block部分,参看 http://man7.org/linux/man-pages/man2/restart_syscall.2.html <br>
+<span class="text-red">所以大的方面来说,select和poll没有本质的区别.</span><br>
+
+<h3>epoll</h3>
+sys_epoll_create(int size)定义在 fs/eventpoll.c#1334, 它其实调用的是 sys_epoll_create1(0). size参数已经被忽略了.<br>
+sys_epoll_create1(int flags)定义在 fs/eventpoll.c#1306. 它就是简单的alloc了一个struct eventpoll,取得一个fd.<br>
+eventpoll是个RB tree.需要monitor的fd都插入到这个RB tree里.当fd ready时,kernel会把fd加到eventpoll的rdllist里.<br><br>
+
+epoll_ctl()就是简单的RB tree操作 insert, remove, mod.<br><br>
+
+epoll_wait()调用ep_poll(), ep_poll()检查eventpoll->rdllist是否有fd在里边,如果有,返回这些fd. 没有的话像select/poll一样切换到别的进程执行.<br>
+
+
+<br>
+<br>
+<br>
+<br>
+<br>
+
+</div>
+<script src="prism.js"></script>
+</body>
+</html>
