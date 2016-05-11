@@ -101,7 +101,8 @@ AddHandler cgi-script .cgi  // 把一个扩展名和一个handler关联起来,�
 
 <h3>源码分析</h3>
 @see The Apache Modules Book: Application Development with Apache (Nick Kew) <br>
-@see http://dev.ariel-networks.com/apr/apr-tutorial/html/apr-tutorial.html
+@see http://dev.ariel-networks.com/apr/apr-tutorial/html/apr-tutorial.html <br>
+<span style="color:red">apr_bucket_type_* 在apr-util里</span><br>
 <pre><code class="language-c">// httpd的main入口定义在 server/main.c#0442
 struct process_rec {
     apr_pool_t *pool;
