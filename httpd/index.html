@@ -24,148 +24,223 @@ httpd -k start|stop|restart|graceful|graceful-stop
 httpd -t
 </code></pre>
 
-
-<h3>cgi-bin</h3>
-一个c语言的例子
-<pre><code class="language-c">// cat a.c
-#include &lt;stdio.h&gt;
-
-int main(int argc, char *argv[], char *env[])
-{
-    printf("Content-Type: text/plain\n\n");
-
-    printf("argc = %d\n", argc);
-
-    printf("argv:\n");
-    int i;
-    for (i = 0; i < argc; i++) {
-        printf("argv[%d] = %s\n", i, argv[i]);
-    }
-
-    printf("evn:\n");
-    i = 0;
-    while (env[i]) {
-        printf("env[%d] = %s\n", i, env[i]);
-        i++;
-    }
-
-    return 0;
-}
-
-// clang a.c
-// http://localhost:8888/cgi-bin/a.out
-</code></pre>
-
-<h3>httpd.conf</h3>
-<pre><code class="language-c">User daemon
-Group daemon
-// 使用普通用户启动 ./httpd -k start, 这里设的User/Group不起作用
-// 使用root用户启动, 才起作用. ps aux | grep httpd 可看到一个root用户的httpd进程和几个daemon用户的httpd进程
-
-AllowOverride   // Types of directives that are allowed in .htaccess files
-                // AllowOverride is valid only in <Directory> sections specified without regular expressions,
-                // not in <Location>, <DirectoryMatch> or <Files> sections.
-                // When this directive is set to None, then .htaccess files are completely ignored.
-                // In this case, the server will not even attempt to read .htaccess files in the filesystem.
-                // When this directive is set to All, then any directive which has the .htaccess Context is allowed in .htaccess files.
-
-Order Allow,Deny
-Order Deny,Allow    // Allow和Deny用来定义规则,Order用于处理规则之外的情况
-                    // 一个请求如果仅匹配Deny,那就Deny,如果仅匹配Allow,那就Allow
-                    // 如果既匹配Deny,又匹配Allow,那就看Order的最后一个是Deny还是Allow
-                    // 如果哪个都不匹配,也看最后一个
-
-/* alias_module
-
-    Redirect:
-    Allows you to tell clients about documents that used to exist in your server's namespace, but do not anymore.
-    The client will make a new request for the document at its new location.
-    Redirect permanent /foo http://www.example.com/bar
-
-    Alias:
-    Maps web paths into filesystem paths and is used to access content that does not live under the DocumentRoot.
-    Alias /webpath /full/filesystem/path
-
-    ScriptAlias:
-    This controls which directories contain server scripts.
-    ScriptAliases are essentially the same as Aliases, except that documents in the target directory are treated as applications
-    and run by the server when requested rather than as documents sent to the client.
-    ScriptAlias /cgi-bin/ "/home/heguangyu5/my-httpd/cgi-bin/"
-*/
-
-mime_module
-AddHandler cgi-script .cgi  // 把一个扩展名和一个handler关联起来,比如要想让cgi-bin/a.out在htdocs里也能运行
-                            // 就得 cp cgi-bin/a.out htdocs/a.cgi
-</code></pre>
-
-
 <h3>源码分析</h3>
 @see The Apache Modules Book: Application Development with Apache (Nick Kew) <br>
 @see http://dev.ariel-networks.com/apr/apr-tutorial/html/apr-tutorial.html <br>
-<span style="color:red">apr_bucket_type_* 在apr-util里</span><br>
-<pre><code class="language-c">// httpd的main入口定义在 server/main.c#0442
+<span style="color:red">apr_bucket_type_* 在apr-util里</span><br><br>
+
+server/main.c#0442
+<pre><code class="language-c">init_process(&argc, &argv); // 初始化apr,创建一个pool和subpool pconf, 初始化process_rec
 struct process_rec {
     apr_pool_t *pool;
-    apr_pool_t *pconf;
+    apr_pool_t *pconf; // apr_pool_create(&process->pconf, process->pool);
     int argc;
     const char * const *argv;
     const char *short_name;
 }
 
-init_process()
-// init_process() 先创建一个 process pool, 又创建一个 pconf subpool, 然后从 argv[0] 里取得启动httpd命令里的文件名做为short_name,初始化好了 process_rec.
+ap_setup_prelinked_modules(process);
+    // 编译时static编译的module列表在modules.c里,这个文件是./configure时生成的
+    // ./apachectl -t -D DUMP_MODULES 可以查看loaded modules
+    struct module_struct {
+        int version, minor_version;     // MODULE_MAGIC_NUMBER_MAJOR, MODULE_MAGIC_NUMBER_MINOR
+        int module_index;               // -1
+        const char *name;               // __FILE__
+        void *dynamic_load_handle;      // NULL
+        struct module_struct *next;     // NULL
+        unsigned long magic;            // MODULE_MAGIC_COOKIE
+        ...
+        const command_rec *cmds;
+        void (*register_hooks)(apr_pool_t *p);
+    };
+    // module声明时 module_index = -1, 这里遍历一次ap_preloaded_modules,把module_index给设上.
+    // 除了preloaded module外,还有dynamic module,默认限制dynamic module最多有128个
+    // ap_loaded_modules是一个最后一项为NULL的指针数组
+    ap_add_module(*module, process->pconf);
+        // 在这里把所有preloaded module通过module->next形成了一个单链表
+        // NULL &lt;- core_module &lt;- authn_file_module &lt;- ... &lt;- so_module
+        ap_add_module_commands(module, pconf);
+        struct command_struct {
+            const char *name;
+            cmd_func func;
+            ...
+        };
+        // apache所有module实现的指令(httpd.conf里的配置指令)都保存在ap_config_hash里,
+        // hash key是cmd的名字,value是struct ap_mod_list_struct {module *m; const command_rec *cmd; *next}
+        // 所以不同module的cmd name可以重复,是能区分开的
+        ap_register_hooks(module, pconf);
+        // 调用module->register_hooks(p)方法注册module添加的hook方法
+        apr_hook_sort_all(); // 没看明白
 
-ap_setup_prelined_modules();
-ap_run_rewrite_args();
+        /* ap_add_module随后也用于add dynamic module, 看下LoadModule的实现
+           @see modules/mappers/mod_so.c#0147
+           @see man dlopen
+           mod_so.c load_module()调用apr_dso_load把.so文件加载到内存,apr_dso_load在linux上其实就是dlopen
+           然后apr_dso_sym查找到module AP_MODULE_DECLARE_DATA XXX_module的内存地址,
+           再调用ap_add_loaded_module,ap_add_loaded_module调用了ap_add_module
+        */
 
-apr_getopt() // @see bin/httpd -h
+ap_run_rewrite_args(process);
+    // 调用module->rewrite_args(process),在刚开始初始化process时,把argc,argv都放到process里了,module可以在这里re-write command line arguments
+    // struct module_struct的注释里写的很清楚, This hook is only available to MPMs.
+    // 看下 server/mpm/prefork/prefork.c#1499, ap_mpm_rewrite_args定义在 server/mpm_common.c#1067
+    // ./httpd -k start|stop|restart 的-k参数就是在这里处理的, -k参数的值记录在dash_k_arg里
 
-ap_read_config("conf/httpd.conf");
-    init_server_config();
-        struct server_rec {
-            process_rec *process;
-            server_rec *next;
+// 接下来处理命令行参数,就是 ./httpd -h看到的那些,我们只关心-k,所以这部分跳过
 
-            char *defn_name; // the name of the server
-            unsigned defn_line_number; // httpd.conf line number the server defined
+server_rec *server_conf = ap_read_config(process, pool_temp, confname="conf/httpd.conf", &ap_conftree);
+    init_server_config(); // 分配并初始化一个server_rec
+                          // server_rec->module_config是一个指针数组,它为每个可能的module都预留一个位置,
+                          // 如果module实现了create_server_config方法,就会调用它并把返回结果保存在这里
+                          // server_rec->lookup_defaults和module_config一样,
+                          // 如果module实现了create_dir_config,就会调用它并把返回结果保存在lookup_defaults里
+    init_config_globals(); => ap_init_vhost_config();
+        // 这个函数就是把iphash_table清0,别的没做啥值得关注的
+        // ap_init_vhost_config的注释里解释了vhost是怎么组织和管理的
+        // vhost分两种,一种是ip-based,一种是name-based
+        // ip-based vhost通过一个hashtable iphash_table[256]管理
+        // name-based vhost首先是一个ip-based vhost,然后再用一个name_chain单链表把同一ip:port下的vhost串起来
+        // 还有两个变量 default_list 和 name_vhost_list 还不知道有什么用
+    process_command_config(ap_server_pre_read_config); // ./httpd -C directive, 我们不关心这个,跳过去
+    ap_server_root_relative("conf/httpd.conf");
+    // 默认的ap_server_root = HTTPD_ROOT = "/usr/local/apache"
+    // 如果在./configure的时候指了prefix,那么HTTPD_ROOT = prefix
+    ap_process_resource_config("/path/to/conf/httpd.conf");
+    // 看起来apache的配置文件可以使用通配符,我们的只关心普通的一个配置文件的情况
+        process_resource_config_nofnmatch("httpd.conf", depth = 0);
+            ap_build_config();
+            // 读取httpd.conf文件,一次读一行,解析出directive
+            // 根据cmd->req_override决定是立即执行对应的函数还是把这个directive加到conftree里
+            // 以ServerRoot举例:
+            // Line 30: ServerRoot "/path/to/httpd"
+            struct ap_directive_t {
+                const char *filename;   // httpd.conf
+                int line_num;           // 30
+                const char *directive;  // ServerRoot
+                const char *args;       // "/path/to/httpd"
+                ap_directive_t *next;
+                ap_directive_t *first_child;
+                ap_directive_t *parent;
+            }
+            AP_INIT_TAKE1("ServerRoot", set_server_root, NULL, RSRC_CONF | EXEC_ON_READ,
+                                    "Common directory of server-related files (logs, confs, etc.)")
+            // req_override = RSRC_CONF | EXEC_ON_READ, 所以读取到这一行时立即执行了set_server_root方法
+    process_command_config(ap_server_post_read_config); // ./httpd -c directive, 跳过去
 
-            char *server_admin;
-            char *server hostname;
-            apr_port_t port;
+ap_run_pre_config() // 不知道在哪里定义的,跳过去
 
-            char *error_fname; // error log filename
-            apr_file_t *error_log;
-            int loglevel;
+ap_process_config_tree(server_conf, ap_conftree, apr_pool_t);
+    // 上边ap_read_config时没有执行的directive,在这里都给执行了
 
-            int is_virtual; // is virtual server
-            struct ap_conf_vector_t *module_config; // module's per-server config
-            struct ap_conf_vector_t *lookup_defaults;
-
-            server_addr_rec *addrs;
-            timeout;            // timeout waiting for messages, 默认300s
-            keep_alive_timeout; // 默认等5秒,如果还没有收到这个连接的下一个请求,就处理别的连接
-            keep_alive_max;     // 一个tcp连接最多处理的请求数量, 默认100
-            keep_alive;         // = 1
-
-            const char *path;
-            int pathlen;
-
-            int limit_req_line;         // Method+URI+HTTP-version (GET / HTTP/1.1) 长度限制, 默认8190
-            int limit_req_fieldsize;    // header field 长度限制, 默认8190
-            int limit_req_fields;       // header field 数量限制, 默认100
-
-            const char *server_scheme;
-        }
-    process_command_config();       // bin/httpd -C "directive" before reading config files
-    ap_process_resource_config();
-    process_command_config();       // bin/httpd -c "directive" after reading config files
+ap_fixup_virtual_hosts();
+    // 先看下NameVirtualHost和VirtualHost
+    // NameVirtualHost *:80 => ap_set_name_virtual_host(),生成一个server_addr_rec并加到name_virtual_list里.
+    // &lt;VirtualHost *:80&gt; => virtualhost_section(),生成一个server_rec,根据*:80也生成一个server_addr_rec并设给server_rec->addrs.
+    //  这个server_rec的is_virtual = 1, module_config和lookup_defaults是空的指针数组
+    //  最后把这个server_rec和main_server连起来,并执行VirtualHost里的directive
+    /*
+        ap_fixup_virtual_hosts主要做的事就是merge_config, 如果virtual_host里对应module的config是空的,
+        就设成和main_server一样,如果不为空,就调用module的merge_方法做merge
+    */
+ap_fini_vhost_config();
 </code></pre>
 
-<br>
-<br>
-<br>
-<br>
-<br>
+小结:
+<p>
+httpd是由module组成的,每个module给httpd贡献了一部分httpd里的配置项(cmd/directive)和一些hooks.<br>
+module可以静态编译进httpd,也可以在httpd启动时加载进来.<br>
+httpd当前包含的module记录在全局变量ap_loaded_modules里.<br>
+module->cmds是一个类似argv的指针数组,它的最后一项为NULL,每一个cmd都有一个名称和对应的执行函数.<br>
+所有module的cmd会合并到一块,保存在全局变量ap_config_hash里,key是cmd的名字,value是module的cmd串起来的单链表.
+</p>
+<p>httpd默认支持一些命令行参数,module也可以添加自己的命令行参数,比如prefork的 -k start|stop|restart.</p>
+<p>
+默认的httpd.conf提供了一个global server/main server,其host_addr=0.0.0.0,host_port=0,virthost="".<br>
+main server初始化时会调用每个module的create_server_config方法,将每个module的server config保存在server->module_config里.<br>
+同时还调用module的create_dir_config方法,将每个module的directive config保存在server->lookup_defaults里.<br>
+<p>
+httpd会先过一遍httpd.conf,识别出其中的配置项,如果这个cmd是要求当即执行的,那就到ap_config_hash里找到对应的执行函数,执行之.如果不需要当即执行,就加到conftree里,后边再执行.<br>
+举两个实际的例子:<br>
+mod_core的ServerRoot cmd是要求EXEC_ON_READ的,httpd读到这个配置项时,会立即调用对应的set_server_root()方法将ap_server_root赋值.<br>
+mod_so的LoadModule cmd也是要求EXEC_ON_READ的,httpd读到这个配置项时,会立即调用load_module方法加载指定的so文件.<br>
+mod_so也是一个server_config使用的例子,它为了记录下都加载了哪些module,在main server初始化调用create_server_config时,分配了一个数组来保存已加载的module,然后在load_module()里通过访问server->module_config[mod_so->module_index]就拿到了这个数组,从而可以做检查判断.<br>
+mod_so在加载完module后,会调用该module的create_server_config和create_dir_config方法.
+</p>
+<p>
+httpd过完httpd.conf后,conftree有了,紧接着再过一遍conftree,把没有执行的cmd都给执行一下.<br>
+<pre><code class="language-c">// @see http://httpd.apache.org/docs/2.2/vhosts/details.html
+// 看下几个感兴趣的directive:
+
+ServerName [scheme://]fully-qualified-domain-name[:port]
+server_hostname_port() // 解析出scheme,hostname,port分别赋值给server_rec->server_scheme,server_hostname,port
+                       // 如果启动时报Could not reliably determine the server's fully qualified domain name, using 127.0.0.1 for ServerName
+                       // 简单地在httpd.conf里加上ServerName配置或者给本机配置一个带.的hostname就好了
+                       // @see ap_fini_vhost_config()
+                       // @see ap_get_local_host()
+
+Listen [IP-address:]portnumber [protocol] // Listen是prefork mpm的cmd,定义在include/ap_listen.h#0115里,对应的function是ap_set_listener
+ap_set_listener()
+    // ap_set_listener()其实就是调用一下int socket(int domain, int type, int protocol),并把多个Listen创建的socket放到单链表ap_listeners里.
+
+NameVirtualHost addr[:port]
+ap_set_name_virtual_host() // 解析出addr,port,生成server_addr_rec,加到name_vhost_list单链表里
+                           // 比如NameVirtualHost *:80会生成host_addr=0.0.0.0,host_port=80,virthost=*
+
+VirtualHost addr[:port] [addr[:port]]
+virtualhost_section()
+    ap_init_virtual_host(); => ap_parse_vhost_addrs();
+    // 创建一个server_rec,根据VirtualHost的参数填充server_rec->addrs,并把第一个addr的port设成server的port
+    // 这里特别提一下: 这个新的server_rec的module_config和lookup_defaults都是空的
+    // 新创建的这个server_rec会和main_server串连在一起形成一个单链表
+    ap_walk_config();
+    // 上边我们知道这个新server_rec的module_config和lookup_defaults都是空的,这里walk_config时,
+    // 当执行到一个module的cmd之前,会调用module的create_server_config和create_dir_config方法
+    // 把server_rec的module_config和lookup_defaults都初始化好,接下来的cmd就可以正常执行了.
+</code></pre>
+httpd在读取并执行完httpd.conf里的配置指令后,就定下来了所有的virthost.<br>
+由于VirtualHost里的配置指令显然比较少,所以现在virthost的配置相比main_server是不完整的,所以接下来的ap_fixup_virtual_hosts会把main_server里各个module的配置merge到virthost里去.这个每个virthost都独立并且完整了.<br>
+httpd对server的分类有两种:<br>
+1) NameVirtualHost *:port<br>
+2) NameVirtualHost ip:port<br>
+第1种是我们常用的,第2种不怎么用.<br>
+上边我们知道httpd在读取配置文件时每遇到一个NameVirtualHost addr:port指令就生成一个server_addr_rec保存到name_vhost_list里.<br>
+httpd在ap_fini_vhost_config()时遍历name_vhost_list,把*:port的归类的default_list里,把ip:port的放到iphash_table里.<br>
+然后遍历所有的virthost,如果是VirtualHost *:port,就先按port归类vhost,再把同一个port的vhost串起来.<br>
+<pre>
+ ___________________        ____________________        ____________________
+|                   |      |                    |      |                    |
+| virthost *:port1  |  ->  | virthost *:port2   |  ->  | virthost *:port3   |
+| server(hostname)  |      | server(hostname)   |      | server(hostname)   |
+        |   __________________       ___________________
+        |__|                  |     |                   |
+           | virthost *:port1 |  -> | virthost *:port1  |
+           | server(hostname) |     | server(hostnam)   |
+</pre>
+</p>
+<p style="color:red">OK, 到此httpd已经读取并执行完了所有的配置指令,所有virthost的配置都ready了,并且组织好了virthost的数据结构.</p>
+<br><br>
+
+<pre><code class="language-c">APR_RETRIEVE_OPTIONAL_FN(ap_signal_server); => apr_dynamic_fn_retrieve(ap_signal_server);
+// 不太明白怎么个调用关系,看起来应该是调用了server/mpm_common.c#0978的ap_signal_server()函数
+int ap_signal_server(int *exit_status, apr_pool_t *pconf);
+// 首先尝试读取ServerRoot/logs/httpd.pid文件,这个文件的存放路径定义在server/mpm/prefork/mpm_default.h#0056,
+// mpm prefork在注册它的hooks时调用了prefork_pre_config()方法,在这里赋值了ap_pid_fname
+// ap_read_pid()定义在server/log.c#0823
+/* 如果httpd.pid文件不存在,那么httpd尚未启动,如果文件存在,通过kill(pid,0)来探测一下看是否真的已经启动了.
+   前边我们知道命令行参数-k start|stop|restart已经保存在dash_k_arg里了,这里开始执行对应的操作
+   start: 如果已经启动了,直接返回1,然后退出,否则返回0,继续向下执行
+   stop:  如果已经启动了,发送信号SIGTERM,否则直接返回1
+   restart: 如果已经启动了,发送信号SIGHUP,然后退出,否则返回0,继续执行
+   graceful: 发送信号AP_SIG_GRACEFUL=SIGUSR1
+   graceful-stop: prefork不支持graceful-stop
+*/
+
+// 接下来的一个for(;;)循环应该是在处理restart这样的逻辑,关键在ap_mpm_run
+</code></pre>
+<br><br>
+
+<code>int ap_mpm_run(apr_pool_t *_pconf, apr_pool_t *plog, server_rec *s);</code>
+<pre><code class="language-c"></code></pre>
 
 </div>
 <script src="prism.js"></script>
