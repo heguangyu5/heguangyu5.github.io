@@ -240,6 +240,153 @@ int ap_signal_server(int *exit_status, apr_pool_t *pconf);
 <br><br>
 
 <code>int ap_mpm_run(apr_pool_t *_pconf, apr_pool_t *plog, server_rec *s);</code>
+<pre><code class="language-c">/* prefork module 定义了以下几个配置指令
+User, Group, ChrootDir: 这三个指令填充了变量 unixd_config
+Listen指令前边我们已经看过了,它就是创建socket,然后保存到ap_listeners里
+其它的几个指令就是简单的赋值操作:
+    ListenBacklog       => ap_listenbacklog
+    SendBufferSize      => send_buffer_size
+    ReceiveBufferSize   => receive_buffer_size
+    StartServers        => ap_daemons_to_start
+    MinSpareServers     => ap_daemons_min_free
+    MaxSpareServers     => ap_daemons_max_free
+    MaxClients          => ap_daemons_limit
+    ServerLimit         => server_limit
+*/
+
+/* 在继续往下看之前,先看下httpd的hooks实现.
+
+相关的文件有3个: server/config.c include/http_config.h include/ap_config.h
+我们把server/config.c里与hook相关的代码单独copy出来,然后clang -E hook.c预处理好,再用indent工作做下格式化,
+就得到了macro展开后的代码.
+*/
+static struct
+{
+  apr_array_header_t *link_header_parser;
+  apr_array_header_t *link_pre_config;
+  apr_array_header_t *link_post_config;
+  apr_array_header_t *link_open_logs;
+  apr_array_header_t *link_child_init;
+  apr_array_header_t *link_handler;
+  apr_array_header_t *link_quick_handler;
+  apr_array_header_t *link_optional_fn_retrieve;
+  apr_array_header_t *link_test_config;
+} _hooks;
+
+void
+ap_hook_header_parser (ap_HOOK_header_parser_t * pf,
+		       const char *const *aszPre, const char *const *aszSucc,
+		       int nOrder)
+{
+  ap_LINK_header_parser_t *pHook;
+  if (!_hooks.link_header_parser)
+    {
+      _hooks.link_header_parser =
+	apr_array_make (apr_hook_global_pool, 1,
+			sizeof (ap_LINK_header_parser_t));
+      apr_hook_sort_register ("header_parser", &_hooks.link_header_parser);
+    }
+  pHook = apr_array_push (_hooks.link_header_parser);
+  pHook->pFunc = pf;
+  pHook->aszPredecessors = aszPre;
+  pHook->aszSuccessors = aszSucc;
+  pHook->nOrder = nOrder;
+  pHook->szName = apr_hook_debug_current;
+  if (apr_hook_debug_enabled)
+    apr_hook_debug_show ("header_parser", aszPre, aszSucc);
+}
+
+apr_array_header_t *
+ap_hook_get_header_parser (void)
+{
+  return _hooks.link_header_parser;
+}
+
+int
+ap_run_header_parser (request_rec * r)
+{
+  ap_LINK_header_parser_t *pHook;
+  int n;
+  int rv;
+  if (!_hooks.link_header_parser)
+    return OK;
+  pHook = (ap_LINK_header_parser_t *) _hooks.link_header_parser->elts;
+  for (n = 0; n < _hooks.link_header_parser->nelts; ++n)
+    {
+      rv = pHook[n].pFunc (r);
+      if (rv != OK && rv != DECLINED)
+	return rv;
+    }
+  return OK;
+}
+/*
+可以看到struct _hooks使用数组归类hook,当第一次向一个类别里注册hook时,会创建数组.
+不同类别的hooks运行要求是不同的,比如header_parser的hook返回OK或DECLINED时,继续执行其它hook,否则就直接返回了.
+而child_init则会运行所有的hook, handler和quick_handler的hook返回DECLINED时会继续执行其它hook,否则直接返回.
+
+hook归类                    什么情况下执行其它hook
+header_parser               OK/DECLINED
+pre_config                  OK/DECLINED
+post_config                 OK/DECLINED
+open_logs                   OK/DECLINED
+child_init                  总是执行其它hook
+handler                     DECLINED
+quick_handler               DECLINED
+optional_fn_retrieve        总是执行其它hook
+test_config                 总是执行其它hook
+*/
+
+/*
+现在再回过头来看httpd的启动流程:
+    httpd一启动,在ap_add_module时把每个module的cmd和hooks就都add了.
+    接着read config后,process config tree之前,调用了ap_run_pre_config(),这里把pre_config的hooks都执行了.
+    process config tree之后,调用了ap_run_open_logs()把open_logs的hooks都执行了.
+    紧接着就是ap_run_post_config()把post_config的hooks都执行了.
+
+    prefork module注册了两个hook:
+    open_logs:  prefork_open_logs
+    pre_config: prefork_pre_config
+*/
+prefork_pre_config();   // 就是初始化一些全局变量,没有什么特别值得关注的
+prefork_open_logs();
+    ap_setup_listeners(); // 前边的process config tree时,每遇到一个Listen指令,我们create了一个socket并记录到ap_listeners链表中
+                          // 这里遍历ap_listener,执行bind,listen操作
+                          // OK,到此,httpd server的socket已经ready了,下一步就是accept connection了.
+                          /* 这里回顾一下socket/tcp相关的知识
+                            man 2 listen
+                            man 7 tcp
+                            tcp连接的建立需要三步: 
+                                1) client发送syn
+                                2) server回复ack/syn
+                                3) client回复ack
+                            连接建立
+                            kernel对每个socket维护两个queue,一个叫syn_backlog,另一个叫backlog
+                            当server收到client的syn后,回复ack/syn并把这个连接放到syn_backlog里(这个queue默认大小是2048).
+                            当server收到client的ack后,把这个连接从syn_backlog转到backlog里(这个queue默认大小是128).
+                            然后就等着accept了.
+                            如果服务器程序accept速度慢了,导致backlog queue满了,kernel会通知client端ECONNREFUSED.(这种情况下kernel会直接drop掉这个连接吗?)
+                            如果服务器程序accept正常,但是有很多client没能及时回复ack导致syn_backlog满了的话,kernel就开始droping request.
+                            也就是说,新的client发送syn给server时,server就不回复ack/syn了.
+                          */
+    ap_mpm_pod_open();  // create了一个pipe,并且closeonexec,不知道做什么用的
+</code></pre>
+
+<pre><code class="language-c">ap_log_pid(); // 把httpd的pid写入到logs/httpd.pid里
+apr_proc_mutex_create(&accept_mutex, ap_lock_fname, ap_accept_lock_mech, _pconf);
+    // libapr ./configure之后,在include/apr.h里可以看到APR_USE_SYSVSEM_SERIALIZE=1,所以在mutex机制是default时,优选sysvmem
+    // @see The Linux Programming Interface Chapter 45: INTRODUCTION TO SYSTEM V IPC
+    // mutex_create其实就是semget,mutex_acquire其实就是semop(-1),mutex_release其实就是semop(+1)
+set_signals(); // install stop/restart signal handler
+startup_children(remaining_children_to_start);
+    // fork出多个children,每个child开始执行child_main()
+// parent process接下来在一个死循环里wait exit的child,创建新的child以及响应stop/restart操作
+</code></pre>
+<br>
+<br>
+<br>
+
+
+<code>child_main();</code>
 <pre><code class="language-c"></code></pre>
 
 </div>
