@@ -376,9 +376,36 @@ apr_proc_mutex_create(&accept_mutex, ap_lock_fname, ap_accept_lock_mech, _pconf)
     // libapr ./configure之后,在include/apr.h里可以看到APR_USE_SYSVSEM_SERIALIZE=1,所以在mutex机制是default时,优选sysvmem
     // @see The Linux Programming Interface Chapter 45: INTRODUCTION TO SYSTEM V IPC
     // mutex_create其实就是semget,mutex_acquire其实就是semop(-1),mutex_release其实就是semop(+1)
+ap_run_pre_mpm(pool, SB_SHARED); // server/scoreboard.c里定义了新的hook归类, pre_mpm
+                                // 目前只有module core注册一个hook函数: ap_create_scoreboard
+                                ap_create_scoreboard(pool, sb_type = SB_SHARED)
+                                    ap_calc_scoreboard_size(); // sizeof(global_score)
+                                                               // + sizeof(process_score) * server_limit
+                                                               // + sizeof(worker_score) * server_limit * thread_limit
+                                                               // + sizeof(lb_score) * lb_limit
+                                    open_scoreboard(); => apr_shm_create(&ap_scoreboard_shm, scoreboard_size);
+                                    ap_init_scoreboard();
+                                        ap_scoreboard_image = calloc(1, sizeof(scoreboard) + server_limit * sizeof(worker_score *));
+                                        struct scoreboard {
+                                            global_score *global;
+                                            process_score *parent;
+                                            worker_score **servers;
+                                            lb_score *balancers;
+                                        };
+                                        // ap_scoreboard_image是一个struct scoreboard加上server_limit个worker_score指针
+                                        // ap_scoreboard_shm = [
+                                        //      image.global        global_score
+                                        //      image.parent        process_score * server_limit
+                                        //      image.servers
+                                        //      image.balancers
+                                        //  ]
+                                        // 小结下: ap_scoreboard_image是一个struct scoreboard, 后边紧跟一堆worker_score指针
+                                        //        真正的数据存储在ap_scoreboard_shm里
+
 set_signals(); // install stop/restart signal handler
 startup_children(remaining_children_to_start);
-    // fork出多个children,每个child开始执行child_main()
+    make_child();  // 在ap_scoreboard_image里标记这个server(child)状态为SERVER_STARTING
+                   // fork出多个children,每个child开始执行child_main()
 // parent process接下来在一个死循环里wait exit的child,创建新的child以及响应stop/restart操作
 </code></pre>
 <br>
@@ -387,7 +414,15 @@ startup_children(remaining_children_to_start);
 
 
 <code>child_main();</code>
-<pre><code class="language-c"></code></pre>
+<pre><code class="language-c">apr_proc_mutex_child_init(&accept_mutex, ap_lock_fname, pchild);
+    // apr_proc_mutex_unix_lock_methods_t定义在 include/arch/unix/apr_arch_proc_mutex.h里
+    // sysvsem的child_init是个空函数
+unixd_setup_child(); // 切换User,Group,ChrootDir
+ap_run_child_init(); // 执行各个module注册的child_init hooks
+                     // prefork自身没有注册child_init hooks
+                     // module_core注册了一个ap_logs_child_init()方法,这个方法close了read_handles,不清楚read_handles做什么用的
+ap_update_child_status(SERVER_READY); // 在ap_scoreboard_image里标记这个server(child)状态为SERVER_READY
+</code></pre>
 
 </div>
 <script src="prism.js"></script>
