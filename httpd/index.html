@@ -10,7 +10,7 @@
 <body>
 <div class="container">
 
-<h1 class="page-header">Apache httpd</h1>
+<h1 class="page-header">Apache httpd 2.2.31</h1>
 
 <h3>bin/apachectl</h3>
 <pre><code class="language-bash">load evnvars # LD_LIBRARY_PATH, 加上httpd自己的lib目录
@@ -349,6 +349,7 @@ test_config                 总是执行其它hook
 */
 prefork_pre_config();   // 就是初始化一些全局变量,没有什么特别值得关注的
 prefork_open_logs();
+    ap_server_conf = server_conf;
     ap_setup_listeners(); // 前边的process config tree时,每遇到一个Listen指令,我们create了一个socket并记录到ap_listeners链表中
                           // 这里遍历ap_listener,执行bind,listen操作
                           // OK,到此,httpd server的socket已经ready了,下一步就是accept connection了.
@@ -422,7 +423,354 @@ ap_run_child_init(); // 执行各个module注册的child_init hooks
                      // prefork自身没有注册child_init hooks
                      // module_core注册了一个ap_logs_child_init()方法,这个方法close了read_handles,不清楚read_handles做什么用的
 ap_update_child_status(SERVER_READY); // 在ap_scoreboard_image里标记这个server(child)状态为SERVER_READY
+
+// 如果有多个Listen指令,使用poll来确定哪一个有client connect了
+// 大多数情况下只有一个Listen 80,所以就用不上poll了
+// 由于我们有多个child,所以使用了accept_mutex,使得同一时间只有一个child能accept
+lr->accept_func() => unixd_accept();
+
+conn_rec *current_conn = ap_run_create_connection(pool, ap_server_conf, accepted_socket, ....);
+    // include/http_connection.h, server/connection.c 里新定义了几个hook:
+    //  create_connection       -> module core: core_create_conn
+    //  pre_connection          -> module core: core_pre_connection
+    //  process_connection      -> module http: ap_process_http_connection
+    //                          -> module echo: process_echo_connection
+    //                          -> module reqtimeout: reqtimeout_init
+    core_create_conn();
+        // 创建一个conn_rec, update child status => SERVER_BUSY_READ
+        // 取得local_ip,remote_ip
+        // c->base_server = ap_server_conf = server_conf;
+        // c->id = id = child_num
+        // c->bucket_alloc = apr_bucket_alloc_create(pchild);
+ap_process_connection();
+    ap_update_vhost_given_ip();
+        find_default_server(port);
+        conn->vhost_lookup_data = virthost->names;
+        conn->base_server = virthost;
+        // 当前请求对应的是哪个VirtualHost确定下来了
+        // 对于 VirtualHost *:80 这种常见的用法,也相当于没有定下来
+    ap_run_pre_connection()
+        core_pre_connection();
+            ap_add_input_filter_handle(ap_core_input_filter_handler);
+            ap_add_output_filter_handler(ap_core_output_filter_handler);
+    ap_run_process_connection()
+        ap_process_http_connection();
+            ap_read_request()
+            // update child status => SERVER_BUSY_WRITE
+            ap_process_request();
+            // update child status => SERVER_BUSY_KEEPALIVE
+ap_lingering_close(); // close connection
 </code></pre>
+
+<code>ap_read_request(conn_rec *conn);</code>
+<pre><code class="language-c">r = apr_pcalloc(pool, sizeof(request_rec));
+r->conn = conn;
+r->server = conn->base_server;
+r->allowed_methods = ap_make_method_list(pool, 2); // GET,POST?
+
+r->headers_in       = apr_table_make(pool, 25);
+r->subprocess_env   = apr_table_make(pool, 25);
+r->headers_out      = apr_table_make(pool, 12);
+r->err_headers_out  = apr_table_make(pool, 5);
+
+r->output_filters = r->proto_output_filters = conn->output_filters;
+r->input_filters  = r->proto_input_filters  = conn->input_filters;
+
+ap_run_create_request(r);
+    // module_core: core_create_req
+    // module_http: http_create_request
+        ap_add_output_filter_handle: byterange, content_length, http_header, http_outerror
+
+read_request_line(r, brigade); // 两种异常结果: 1) REQUEST_URI_TOO_LARGE 2) REQUEST_TIME_OUT
+    r->the_request = "GET / HTTP/1.1"
+    r->method = "GET";
+    r->method_number = "GET" =>  M_GET
+    ap_parse_uri(r, uri = "/");
+        r->unparsed_uri = uri;
+        apr_uri_parse(pool, uri, &r->aprsed_uri);
+        // sets r->args to rest after '?' (or NULL if no '?')
+        // sets r->uri to request uri (without r->args part)
+        // sets r->hostname (if not set already) from request (scheme://host:port)
+    r->protocol = "HTTP/1.1"
+    r->proto_num = HTTP_VERSION(1, 1)
+ap_get_mime_headers_core(r, brigade);
+    apr_table_addn(r->headers_in, field, value);
+    apr_table_compress(r->headers_in, APR_OVERLAP_TABLES_MERGE);
+apr_table_get(r->headers_in, "Transfer-Encoding"); // If a Transfer-Encoding header field is
+                                                   // present in a request and the chunked transfer coding is not
+                                                   // the final encoding ...; the server MUST respond with the 400
+                                                   // (Bad Request) status code and then close the connection
+
+ap_update_vhost_from_headers(r);
+    r->hostname = apr_table_get(r->headers_in, "Host");
+    check_hostalias(r); // 在ap_process_connection的开始,httpd根据port找到了server及names
+                        // 这里遍历names找到与Host header相匹配的,确定下来r->server
+
+ap_add_input_filter_handle(ap_http_input_filter_handle);
+
+ap_run_post_read_request(r);
+    // mod_auth_digest
+    // mod_reqtimeout
+    // mod_headers
+    // mod_setenvif
+    // mod_unique_id
+</code></pre>
+小结一下: ap_read_request()读取并解析http请求的header头部分,匹配出vhost,创建好request_rec.<br>
+如果要keepalive,则处理完这个请求后继续read next request,否则断掉这个connection.<br>
+mpm里的MaxRequstsPerChild指的是connection,不是request.<br><br>
+
+<code>ap_process_request(conn_rec *conn);</code>
+<pre><code class="language-c">ap_run_quick_handler(r, 0);
+// mod_cache: cache_url_handler
+// IF Quick handler DECLINED
+    ap_process_request_internal(r);
+        ap_location_walk(r);        // Location,LocationMatch
+        ap_run_translate_name(r);
+        // mod_core: ap_core_translate => r->filename = documentRoot + uri
+        // mod_alias: translate_alias_redir
+        // mod_rewrite: hook_uri2file
+        ap_run_map_to_storage(r);
+        // mod_core: core_map_to_storage
+        ap_location_walk();
+        ap_run_header_parser();
+        // mod_setenvif: match_headers
+        ap_run_access_checker()
+        ap_run_check_user_id()
+        ap_run_auth_checker()
+        ap_run_type_checker()
+        /* mod_mime: find_ct
+            mod_mime在post_config hook里读取conf/mime.types把文件扩展名和mime type的关系放到hashtable mime_type_extensions里
+            AddType,AddEncoding,AddHandler等指令会填充conf->extension_mappings
+            通过AddType添加到extension_mappings的ext优先级要比mime_type_extensions里的高
+            find_ct首先在conf->extension_mappings里根据扩展名查找extinfo. 
+            这里我们比较关心handler,通过AddHandler指令可以把一个文件扩展名和handler关联起来.
+        */
+        ap_run_fixups();
+    // IF OK
+    ap_invoke_handler(r);
+        ap_run_insert_filter();
+        invoke_filter_init(r->input_filters);
+        invoke_filter_init(r->output_filters);
+        r->handler = handler = r->content_type || ap_default_type() "text/plain"
+        ap_run_handler(r);
+        // mod_core: default_handler
+        // mod_rewrite: handler_redirect (r->filename = "redirect:XXX")
+        // mod_cgi: cgi_handler (r->handler == "cgi_handler")
+            cgi_handler()
+                ap_add_common_vars(); // 填充subprocess_env
+                ap_add_cgi_vars();    // 进一步填充subprocess_env
+                cgi_build_command();  // default_build_command(), command = r->filename, 计算argc, argv
+                run_cgi_child();      // apr_proc_create() fork and pipe
+        // mod_php: php_handler
+ap_run_log_transaction(); // update child status => SERVER_BUSY_LOG
+</code></pre>
+<br>
+<br>
+
+<p style="color:red">handler是在哪个地方确定下来的?</p>
+<pre>
+mod_core: SetHandler
+    &lt;FilesMatch "\.ph(p3?|tml)$"&gt;
+        SetHandler application/x-httpd-php
+    &lt;/FilesMatch>
+    &lt;FilesMatch "\.phps$"&gt;
+        SetHandler application/x-httpd-php-source
+    &lt;/FilesMatch&gt;
+mod_mime: AddHandler
+    // 一个hashtable记录着ext => ext_info(包含handler)
+    AddHandler cgi-script .cgi
+</pre>
+
+<h3>TOY HTTP SERVER</h3>
+<pre><code class="language-c">    socket()
+    bind()
+    listen()
+    while (conn = accept()) {
+        fork();
+        // child process request
+        // parent wait child exit
+    }
+</code></pre>
+
+<h3>APACHE HTTPD(prefork) 2.2.31</h3>
+<pre><code class="language-c">/*
+    Listen 80
+    &lt;FilesMatch "\.ph(p3?|tml)$"&gt;
+        SetHandler application/x-httpd-php
+    &lt;/FilesMatch&gt;
+    NameVirtualHost *:80
+    &lt;VirtualHost *:80&gt;
+        DocumentRoot "/path/to/a.example.com"
+        ServerName a.example.com
+    &lt;/VirtualHost&gt;
+    &lt;VirtualHost *:80&gt;
+        DocumentRoot "/path/to/b.example.com"
+        ServerName b.example.com
+    &lt;/VirtualHost&gt;
+*/
+    socket()
+    bind()
+    listen()
+    // create proc mutex, scoreboard
+    // fork children, parent wait child exit, create new child
+    // child-1                                                  |  child-2
+    while (connection_count &lt; MaxRequestsPerChild) {            |   while (connection_count &lt; MaxRequestsPerChild) {
+        mutex_lock()                                            |       mutex_lock()
+        conn = accept()                                         |       conn = accept()
+        mutex_unlock();                                         |       mutex_unlock();
+        create_connection();                                    |       create_connection();
+        set conn vhost lookup data(default_list->names)         |       set conn vhost lookup data(default_list->names)
+        if lookup failed, base_server = "a.example.com"         |       if lookup failed, base_server = "a.example.com"
+        while (keepalive) {                                     |       while (keepalive) {
+            read_request();                                     |           read_request();
+            process_request();                                  |           process_request();
+        }                                                       |       }
+        connection_count++;                                     |       connection_count++;
+    }                                                           |   }
+    child_exit();                                               |   child_exit();
+
+// NameVirtualHost *:80
+struct server_addr_rec *name_vhost_list = {
+    server_addr_rec *next       = NULL;
+    apr_sockaddr_t *host_addr   = apr_sockaddr_info_get(&my_addr, "0.0.0.0", APR_INET, 80);
+    apr_port_t host_port        = 80;
+    chr *virthost               = "*";
+};
+// &lt;VirtualHost *:80&gt; ... &lt;/VirtualHost&gt;
+server_rec *s = {
+    int is_virtual = 1;
+    server_addr_rec *addrs = {
+        server_addr_rec *next       = NULL;
+        apr_sockaddr_t *host_addr   = apr_sockaddr_info_get(&my_addr, "0.0.0.0", APR_INET, 80);
+        apr_port_t host_port        = 80;
+        chr *virthost               = "*";
+    }
+    char *server_hostname = "a.example.com"; // ServerName a.example.com
+    apr_port_t port = 0;
+    struct ap_conf_vector_t *module_config = {
+        // ...
+        core_module: struct core_server_config = {
+            ap_document_root = "/path/to/a.example.com";
+        }
+        // ...
+    };
+};
+
+// main_server -> b.example.com -> a.example.com -> NULL
+
+ap_fixup_virtual_hosts(); // merge main server config
+ap_fini_vhost_config();
+    struct ipaddr_chain *default_list = {
+        // build from name_vhost_list
+        ipaddr_chain *next   = NULL;
+        server_addr_rec *sar = {host_port = 80, virthost = *};
+        // build from main server linked list
+        server_rec *server   = "a.example.com";
+        name_chain *names    = {
+            server_addr_rec *sar = {host_port = 80, virthost = *}
+            server_rec *server = {a.example.com}
+        }  --> {
+            server_addr_rec *sar = {host_port = 80, virthost = *}
+            server_rec *server = {b.example.com}
+        };
+    };
+
+// read_request
+request_rec {
+    // read_request_line
+    char *the_request       = "GET /?key=val HTTP/1.1";
+    char *method            = "GET";
+    int   method_number       = M_GET;
+    char *unparsed_uri      = "/?key=val"
+    apr_uri_t parsed_uri    = {scheme,hostinfo,user,password,hostname,port_str,path,query,fragment,...};
+    char *args              = "key=val";
+    char *uri               = "/";
+    char *protocol          = "HTTP/1.1";
+    int   proto_num           = HTTP_VERSION(1, 1);
+    // ap_get_mime_headers_core()
+    apr_table_t *headers_in;
+    // ap_update_vhost_from_headers()
+    char *host = "a.example.com";
+    server_rec *server = {a.example.com}; // 默认值: conn->base_server
+                                          // conn->base_server在conn创建时=ap_server_conf=main_server (@see prefork_open_logs)
+                                          // 在find vhost lookup data时,=default_list->server
+                                          // search host in vhost lookup data(default_list->names)
+                                          // 所以,一旦配置了虚拟主机,就没有main server
+}
+
+// process_request
+    ap_run_quick_handler(); // mod_cache
+    ap_process_request_internal();
+    request_rec {
+        // ap_run_translate_name
+        char *filename = "/tmp/a.example.com/";
+        // ap_run_map_to_storage
+        apr_finfo_t finfo = apr_stat(...);
+        // ap_run_header_parser
+        // module aaa
+        // ap_run_type_checker(): 如果配置了mime_module的AddHandler,那么这里就定下来了r->handler
+        // ap_run_fixups(): core_override_type() FilesMatch php SetHandler application/x-httpd-php
+    }
+    ap_invoke_handler();
+        // 如果到这里还没有确定handler,那么handler = r->content_type || "text/plain"
+        ap_run_handler();
+</code></pre>
+
+<h3>mod php</h3>
+<pre><code class="language-c">ap_hook_pre_config: php_pre_config: // 如果apache是threaded_mpm,php要threadsafe
+ap_hook_post_config: php_apache_server_startup
+ap_hook_handler: php_handler
+ap_hook_child_init: php_apache_child_init
+
+
+php_handler(request_rec *r);
+    // 检查r->finfo确认php脚本文件是存在的
+    ap_add_common_vars(r);
+        /*
+            CONTENT_TYPE/CONTENT_LENGTH
+            HTTP_HEADERS
+            PATH
+            SERVER_SIGNATURE
+            SERVER_SOFTWARE
+            SERVER_NAME
+            SERVER_ADDR
+            SERVER_PORT
+            // REMOTE_HOST
+            REMOTE_ADDR
+            DOCUMENT_ROOT
+            SERVER_ADMIN
+            SCRIPT_FILENAME
+            REMOTE_PORT
+            // REMOTE_USER
+            // REDIRECT_REMOTE_USER
+            // AUTH_TYPE
+            // REMOTE_IDENT
+            // REDIRECT_QUERY_STRING
+            // REDIRECT_URL
+        */
+    ap_add_cgi_vars(r);
+        /*
+            GATEWAY_INTERFACE="CGI/1.1"
+            SERVER_PROTOCOL=r->protocol
+            REQUEST_METHOD=r->method
+            QUERY_STRIN=r->args || ""
+            REQUEST_URI="/?key=val"
+            SCRIPT_NAME
+            PATH_INFO
+            // PATH_TRANSLATED
+        */
+    php_apache_request_ctor();
+        // build sapi_globals.request_info
+        php_execute_script(zend_file_handle zfd);
+</code></pre>
+
+<h3>TODO</h3>
+input_filters, output_filters<br>
+从input_filters里get_brigade,读取输入.<br>
+pass_brigade到ourput_filters,输出.<br>
+细节是怎么回事还要再细看.
+
+
 
 </div>
 <script src="prism.js"></script>
