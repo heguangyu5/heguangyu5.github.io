@@ -771,6 +771,64 @@ pass_brigade到ourput_filters,输出.<br>
 细节是怎么回事还要再细看.
 
 
+<h3>ab测试</h3>
+<pre># 编译httpd
+./configure --prefix=/home/heguangyu5/my-httpd/
+make
+make install
+
+# httpd.conf
+Listen 8888
+
+NameVirtualHost *:8888
+&lt;VirtualHost *:8888&gt;
+	ServerName a.example.com
+	DocumentRoot /var/www/a.example.com
+	&lt;Directory "/var/www/a.example.com"&gt;
+		Order allow,deny
+		Allow from all
+	&lt;/Directory&gt;
+&lt;/VirtualHost&gt;
+
+&lt;VirtualHost *:8888&gt;
+	ServerName b.example.com
+	DocumentRoot /var/www/b.example.com
+	&lt;Directory "/var/www/b.example.com"&gt;
+		Order allow,deny
+		Allow from all
+	&lt;/Directory&gt;
+&lt;/VirtualHost&gt;
+
+sudo ./httpd -k start
+
+mpm_prefork_module:
+    StartServers 5 # ps aux | grep httpd 可验证, 1个root的process(parent)和5个daemon的process(child)
+    MinSpareServers 5
+    MaxSpareServers 10
+    ServerLimit 256 (最大能调整到20W)
+    MaxClients 256 (默认等于ServerLimit)
+    MaxRequestsPerChild 10000
+
+httpd默认启动5个child server,每一个tcp connection会占用一个child server,当前最多启动256个child server.
+每个server处理过10000个tcp connection后,会exit. 注意是10000个tcp connection,不是http请求.
+访问一个页面,浏览器可能会open多个tcp connection,而不是1个.
+
+所以,为了支持N个并发连接,必须有N个child server.
+为了支持N个并发用户,必须有 N * 浏览器open的tcp connection数(@see http://www.browserscope.org/?category=network, 大多数是6).
+由于大多数浏览器都会keep alive,所以一旦child server accept了conn,这个conn就会占用这个server几秒时间.
+
+其它需要考虑的就是kernel调度这么多child server执行消耗cpu,内存,io的问题了.
+
+httpd支持的并发用户数 = MaxClients / 6 = 256 / 6 = 43
+即使httpd处理http请求非常快,由于keepalive的原因,在几秒内child server并不能处理其它请求
+
+验证: 写个php脚本,fork出300个child,每个child发一个http请求并keep alive. 前256个应该很快就返回了,后边的要等上几秒才能拿到结果.
+
+httpd.conf 调整 MaxSpareServers 256
+执行几次 php test-keepalive.php 让child server都启动起来
+然后再执行一次 php test-keepalive.php, 观察结果: 有256个php client child 5秒结束,其它的10秒结束.
+</pre>
+
 
 </div>
 <script src="prism.js"></script>
