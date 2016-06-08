@@ -827,7 +827,42 @@ httpd支持的并发用户数 = MaxClients / 6 = 256 / 6 = 43
 httpd.conf 调整 MaxSpareServers 256
 执行几次 php test-keepalive.php 让child server都启动起来
 然后再执行一次 php test-keepalive.php, 观察结果: 有256个php client child 5秒结束,其它的10秒结束.
+
+
+httpd默认KeepAliveTimeout=5,MaxKeepAliveRequests=100.
+具体意思是: tcp connection建立后,可以每隔5秒发一个请求,最多发100个.
+run test-keepalive-timeout-max.php
 </pre>
+
+<code>support/ab.c</code>
+<pre><code class="language-c">// ab.c的main()函数处理好命令行参数后,调用test()执行测试
+test()
+    // 分配concurrency个connection,准备好request
+    // for循环start_connect: socket_create,socket_connect,write_request,add socketfd到pollset
+    // poll监控服务器端响应,如果连接出错了,重新连;如果服务器正常响应了,read_response.
+    // read_response先拿到header,根据header里的Keep-Alive确定服务器端是否支持keepalive,支持的话继续write_request
+    // 否则服务器端断开连接,ab会读到EOF,然后就close connection了.
+
+// 结论: 由于ab会尽可能的使用keepalive connection(httpd默认配置的话,一个connection可以完成100个request),
+//      所以ab的测试结果更多表明了服务器端处理request的速度(read_request,process_request,invoke_handler),
+//      而真实应用场景里(拿chrome举例,chrome发起6个tcp connection,这6个完全断开前,可以发出600个request,这是1个并发用户),会加上很多tcp连接关闭的消耗.
+
+// test default_handler send static file index.html 39980 bytes
+// Intel® Core™ i5-3450 CPU @ 3.10GHz × 4
+ab -c 100 -n 10000 -k http://a.example.com:8888/index.html
+// 服务器有256个server可用,100并发不用等,全都立即accept了,每个connection处理100个request,不需要再发起tcp连接.
+// 结果: 10ms
+ab -c 256 -n 10000 -k http://a.example.com:8888/index.html
+// 服务器有256个server可用,100并发不用等,全都立即accept了,每个connection处理&lt;50个request,不需要再发起tcp连接.
+// 结果: 20ms (服务器调度256个server在4个cpu执行导致的?)
+ab -c 300 -n 10000 -k http://a.example.com:8888/index.html
+// 服务器有256个server可用,300并发,后来的40多个connection要等一下,在listen backlog queue里等着accept.
+// 结果: 30ms
+ab -c 400 -n 10000 -k http://a.example.com:8888/index.html
+// 400并发,listen backlog queue超出了
+// 结果: 30ms failed: 117 requests
+600并发, connection reset by peer (why? what happens when backlog is full?)
+</code></pre>
 
 
 </div>
