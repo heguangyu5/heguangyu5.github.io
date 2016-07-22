@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">PHP 7.0.4</h1>
+
+<h3>php是怎么解释执行php代码的?(cli echo)</h3>
+<pre><code class="language-c">// @see flex & bison John R. Levine
+// @see http://www.php-internals.com/book/?p=chapt07/07-00-zend-vm
+
+struct _zend_compiler_globals compiler_globals; // Zend/zend_compile.c#0085
+#define CG(v) (compiler_globals.v)
+
+struct _sapi_globals_struct sapi_globals; // main/SAPI.h#0121
+# define SG(v) (sapi_globals.v)
+
+struct _php_core_globals core_globals; // main/php_globals.h#0056
+# define PG(v) (core_globals.v)
+
+// main函数入口: sapi/cli/php_cli.c#1164
+do_cli(argc, argv);
+    cli_seek_file_begin(&file_handle, script_file, &lineno);
+    php_request_startup();
+    php_execute_script(&file_handle); // behavior = PHP_MODE_STANDARD;
+
+int php_execute_script(zend_file_handle *primary_file);
+    zend_execute_scripts(ZEND_REQUIRE, NULL, 3, prepend_file_p, primary_file, append_file_p);
+        op_array = zend_compile_file(file_handle, type);
+            // Zend/zend_compile.c#0081
+            // zend_op_array *(*zend_compile_file)(zend_file_handle *file_handle, int type);
+            // php_cli_startup -> php_module_startup -> zend_startup -> zend_compile_file = compile_file
+        zend_execute(op_array, retval);
+
+// Zend/zend_language_scanner.c#0574
+// Zend/zend_language_scanner.l#0572
+zend_op_array *compile_file(zend_file_handle *file_handle, int type);
+    // yyparse怎么变成zendparse还没搞明白,但好像和bison的pure_parser有关系, yyparse()如果执行成功返回0
+    /**
+     * OK, 说到yyparse了:
+     *
+     * Zend/zend_language_scanner.l 读取php代码文件,返回一个个的TOKEN (re2c)
+     * Zend/zend_language_parser.y 拿到TOKEN后,根据定义好的rule生成ast
+     *
+     *  start:
+     *      top_statement_list { CG(ast) = $1 }
+     *      ;
+     *  top_statement_list:
+     *      top_statement_list top_statement { $$ = zend_ast_list_add($1, $2); }
+     *      | empty { $$ = zend_ast_create_list(0, ZEND_AST_STMT_LIST); }
+     *      ;
+     *  top_statement:
+     *      statement   { $$ = $1}
+     *      | ....
+     *
+     *
+     * 翻译下就是:
+     *  compiler_globals.ast = zend_ast_create_list(0, ZEND_AST_STMT_LIST);
+     *  zend_ast_list_add(ast, ast);
+     *
+     * 以 echo 'hello', 'world' 为例:
+     *  zend_language_scanner.l
+     *      &lt;ST_IN_SCRIPTING&gt;"echo" {
+     *          RETURN_TOKEN(T_ECHO);
+     *      }
+     *      &lt;ST_IN_SCRIPTING&gt;b?['] {
+     *          ....
+     *          RETURN_TOKEN(T_CONSTANT_ENCAPSED_STRING);
+     *      }
+     *      &lt;ST_IN_SCRIPTING&gt;{TOKENS} {   // TOKENS [;:,.\[\]()|^&+-/*=%!~$<>?@]
+     *          RETURN_TOKEN(yytext[0]);
+     *      }
+     *  scanner 返回 "T_ECHO T_CONSTANT_ENCAPSED_STRING , T_CONSTANT_ENCAPSED_STRING"
+     *  字符串在zendlval里, 正常应该是yylval,怎么变成zendlval的,不明白
+     *
+     *  跟踪代码执行发现: zend_compile.c里调用lex_scan()来scan php源码,得到token及zendlval
+     *                 在这里 T_CONSTANT_ENCAPSED_STRING => zend_parser_stack_elem.ast = zend_ast_create_zval(zendlval)
+     *                 struct _zend_ast_zval {
+     *                      zend_ast_kind kind = ZEND_AST_ZVAL,
+     *                      zend_ast_attr attr = 0,
+     *                      zval val           = zendlval
+     *                  }
+     *      union _zend_parser_stack_elem {
+     *          zend_ast *ast;
+     *          zend_string *str;
+     *          zend_ulong num;
+     *      }
+     *
+     *  zend_language_parser.y
+     *      #define YYSTYPE zend_parser_stack_elem
+     *      %token &lt;ast&gt; T_CONSTANT_ENCAPSED_STRING "quoted-string (T_CONSTANT_ENCAPSED_STRING)"
+     *      statement:
+     *          ...
+     *          | T_ECHO echo_expr_list ';' { $$ = $2 }
+     *          ...
+     *          ;
+     *      echo_expr_list:
+     *            echo_expr_list ',' echo_expr { $$ = zend_ast_list_add($1, $3); }
+     *          | echo_expr { $$ = zend_ast_create_list(1, ZEND_AST_STMT_LIST, $1); }
+     *          ;
+     *      echo_expr:
+     *          expr { $$ = zend_ast_create(ZEND_AST_ECHO, $1); }
+     *          ;
+     *      expr:
+     *            variable { $$ = $1; }
+     *          | expr_without_variable { $$ = $1; }
+     *          ;
+     *      expr_without_variable:
+     *          ...
+     *          | scalar { $$ = $1 }
+     *          ...
+     *          ;
+     *      scalar:
+     *          ...
+     *          | dereferencable_scalar { $$ = $1; }
+     *          ...
+     *          ;
+     *      dereferencable_scalar:
+     *          ...
+     *          | T_CONSTANT_ENCAPSED_STRING { $$ = $1; }
+     *          ;
+     *
+     *  翻译下就是:
+     *      ast_hello: zend_ast_create(ZEND_AST_ECHO, zend_parser_stack_elem.ast);               // echo_expr
+     *      ast_list : zend_ast_create_list(1, ZEND_AST_STMT_LIST, ast_hello); // echo_expr_list
+     *      ast_world: zend_ast_create(ZEND_AST_ECHO, zend_parser_stack_elem.ast);               // echo_expr
+     *                 zend_ast_list_add(ast_list, $ast_world);                // echo_expr_list ',' echo_expr
+     *      statement: ast_list                                                // T_ECHO echo_expr_list ';'
+     *      top_statement: ast_list
+     *      compiler_globals.ast = zend_ast_create_list(0, ZEND_AST_STMT_LIST);
+     *      zend_ast_list_add(compiler_globals.ast, ast_list);
+     *  最终:
+     */
+            compiler_globals.ast = struct _zend_ast_list {
+                zend_ast_kind(u16) kind  = ZEND_AST_STMT_LIST = 133 = 0x85,
+                zend_ast_attr(u16) attr  = 0,
+                uint32_t lineno     = CG(zend_lineno) = 1,
+                uint32_t children   = 1, (翻译器会在这里padding 2个字节)
+                zend_ast *child[4]  = {
+                    // child 0
+                    struct _zend_ast_list {
+                        kind     = ZEND_AST_STMT_LIST = 0x85,
+                        attr     = 0,
+                        lineno   = CG(zend_lineno) = 2,
+                        children = 2,
+                        child[4] = {
+                            // child 0: ast_hello
+                            struct _zend_ast {
+                                zend_ast_kind kind = ZEND_AST_ECHO = 282 = 0x11a,
+                                zend_ast_attr attr = 0,
+                                uint32_t lineno    = MIN(children lineno) = 2,
+                                zend_ast *child[ZEND_AST_ECHO >> ZEND_AST_NUM_CHILDREN_SHIFT(8)] = {
+                                    zend_parser_stack_elem.ast = {
+                                        zend_ast_kind kind = ZEND_AST_ZVAL = 4,
+                                        zend_ast_attr attr = 0,
+                                        zval val           = {
+                                            zend_value value = {
+                                                zend_string *str.val = "hello" // @see zend_string_init()
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // child 1: ast_world
+                            struct _zend_ast {
+                                zend_ast_kind kind = ZEND_AST_ECHO,
+                                zend_ast_attr attr = 0,
+                                uint32_t lineno    = MIN(children lineno),
+                                zend_ast *child[ZEND_AST_ECHO >> ZEND_AST_NUM_CHILDREN_SHIFT(8)] = {
+                                    zend_parser_stack_elem.ast = "world"
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+    op_array = emalloc(sizeof(zend_op_array));
+    init_op_array(op_array, ZEND_EVAL_CODE, INITIAL_OP_ARRAY_SIZE);
+    CG(active_op_array) = op_array;
+
+    zend_compile_top_stmt(CG(ast));
+        // 递归compile所有child
+        // compile不同kind的ast: return, echo, throw, while, for, foreach, func_decl
+        void zend_compile_echo(zend_ast *ast);
+            zend_compile_expr(&expr_node, expr_ast);
+                expr_node->u.constant = zval; // "hello"
+                expr_node->op_type = IS_CONST;
+            zend_emit_op(NULL, ZEND_ECHO, &expr_node, NULL);
+            // zend_op *zend_emit_op(znode *result, zend_uchar opcode, znode *op1, znode *op2);
+                zend_op *opline = get_next_op(CG(active_op_array));
+                opline->opcode = opcode; // ZEND_ECHO
+                SET_NODE(opline->op1, op1);
+    // 到此, CG(active_op_array)里有两个zend_op, opcode = ZEND_ECHO, op1 = "hello", "world"
+    zend_emit_final_return(&retval_zv); // opcode = ZEND_RETURN
+    pass_two(op_array);
+
+void zend_execute(zend_op_array *op_array, zval *return_value);
+    // zend_startup: zend_execute_ex = execute_ex;
+    zend_execute_ex(execute_data);
+    ((opcode_handler_t)OPLINE->handler)(ZEND_OPCODE_HANDLER_ARGS_PASSTHRU))
+    // 最终执行的是zend_op handler, 所以关键在上边pass_two里的 ZEND_VM_SET_OPCODE_HANDLER(opline);
+    op->handler = zend_vm_get_opcode_handler(zend_user_opcodes[op->opcode], op);
+        // ZEND_ECHO   = 40 = 0x28
+        // ZEND_RETURN = 62 = 0x3e
+        zend_opcode_handlers[opcode * 25 + zend_vm_decode[op->op1_type] * 5 + zend_vm_decode[op->op2_type]];
+        // ECHO: 40 * 25 + 0 * 5 + 3 = 1013 => ZEND_ECHO_SPEC_CONST_HANDLER
+        // 最终调用 zend_write => utility_functions->write_function = php_output_wrapper = php_output_write
+        // = sapi_module.ub_write = sapi_cli_ub_write = write(STDOUT_FILENO, str, str_length);
+</code></pre>
+
+<h3>cli function phpinfo()</h3>
+<pre><code class="language-c">/* zend_language_parser.y
+function_call:
+    name argument_list { $$ = zend_ast_create(ZEND_AST_CALL, $1, $2); }
+    ...
+    ;
+namespace_name:
+    T_STRING { $$ = $1; }
+    ...
+    ;
+name:
+    namespace_name { $$ = $1; $$->attr = ZEND_NAME_NOT_FQ; }
+    ...
+    ;
+argument_list:
+      '(' ')' { $$ = zend_ast_create_list(0, ZEND_AST_ARG_LIST); }
+    | '(' non_empty_argument_list ')' { $$ = $2; }
+    ;
+
+    phpinfo(); // T_STRING, '(', ')'
+    zend_parser_stack_elem.ast = zend_ast_create_zval(zendlval); // phpinfo
+    zend_parser_stack_elem.ast->attr = ZEND_NAME_NOT_FQ;
+    arg_ast = zend_ast_create_list(0, ZEND_AST_ARG_LIST);
+    function_call_ast = zend_ast_create(ZEND_AST_CALL, zend_parser_stack_elem.ast, arg_ast);
+
+    最终: ZEND_AST_CALL 有两个children, 一个是 zend_parser_stack_elem.ast, 一个是 arg_ast
+
+    在zend_compile_call()里,调用
+        zend_compile_function_name()
+            zend_resolve_function_name()
+                zend_resolve_non_class_name()
+                    zend_prefix_with_ns()
+        zend_hash_find_ptr(CG(function_table), "phpinfo");
+
+    php里的function是怎么来的? zend_module_entry.functions 每个module public出来的function都在这里
+    php启动时会把它们加到function_table里?
+
+    opcode = ZEND_INIT_FCALL
+    handler = 61 * 25 + 3 * 5 + 0 = ZEND_INIT_FCALL_SPEC_CONST_HANDLER
+*/
+</code></pre>
+
+</div>
+<script src="prism.js"></script>
+</body>
+</html>
