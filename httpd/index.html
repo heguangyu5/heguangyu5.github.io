@@ -362,12 +362,62 @@ prefork_open_logs();
                                 3) client回复ack
                             连接建立
                             kernel对每个socket维护两个queue,一个叫syn_backlog,另一个叫backlog
-                            当server收到client的syn后,回复ack/syn并把这个连接放到syn_backlog里(这个queue默认大小是2048).
-                            当server收到client的ack后,把这个连接从syn_backlog转到backlog里(这个queue默认大小是128).
+                            当server收到client的syn后,回复ack/syn并把这个连接放到syn_backlog里(这个queue默认大小是2048 cat /proc/sys/net/ipv4/tcp_max_syn_backlog).
+                            当server收到client的ack后,把这个连接从syn_backlog转到backlog里(这个queue默认大小是128 cat /proc/sys/net/core/somaxconn).
                             然后就等着accept了.
                             如果服务器程序accept速度慢了,导致backlog queue满了,kernel会通知client端ECONNREFUSED.(这种情况下kernel会直接drop掉这个连接吗?)
                             如果服务器程序accept正常,但是有很多client没能及时回复ack导致syn_backlog满了的话,kernel就开始droping request.
                             也就是说,新的client发送syn给server时,server就不回复ack/syn了.
+
+                            socket()在kernel里的实现在 net/socket.c#1294, 实际上最终调用的是net family的create方法,对于tcp来说,就是inet_create. @see net/ipv4/af_inet.c#981
+                            tcp对应的sock ops是 inet_stream_ops. @see net/ipv4/af_inet.c#990
+
+                            struct socket {
+                                socket_state state;
+                                short type;
+                                unsigned long flags;
+                                socket_wq *wq;
+                                struct file *file;
+                                struct sock *sk;
+                                const struct proto_ops *ops;
+                            }
+                            struct proto_ops {
+                                int family;
+                                int (*bind)(...);
+                                int (*listen)(...);
+                                int (*accept)(...);
+                                int (*shutdown)(...);
+                                ...
+                            };
+                            struct inet_protosw inetsw_array[] = {
+                                {
+                                    .type       = SOCK_STREAM,
+                                    .protocol   = IPPROTO_TCP,
+                                    .prot       = &tcp_prot,
+                                    .ops        = &inet_stream_ops
+                                }
+                            }
+
+                            listen()在kernel里的实现在 net/socket.c#1445, 实际上调用的是sock->ops->listen() => inet_listen => inet_csk_listen_start
+                            backlog也叫 sk_max_ack_backlog, 这个queue叫 icsk_accept_queue icsk = inet_connection_sock
+
+                            accept()在kernel里的实现在 net/socket.c#1478, 实际上调用的是sock->ops->accept() => inet_accept => inet_csk_accept
+                            accept是从sock.icsk_accept_queue里取新连接的
+
+                            完整的packet从网卡到tcp的流程参看 http://blog.packagecloud.io/eng/2016/06/22/monitoring-tuning-linux-networking-stack-receiving-data/
+                            tcp_v4_rcv()
+                                struct sock *sk = __inet_lookup_skb(&tcp_hashinfo, skb, th->source, th->dest);
+                                tcp_v4_do_rcv()　=>　tcp_v4_hnd_req()
+                                根据source,dest找到sock,然后如果sk->sk_state=TCP_LISTEN,调用tcp_v4_hnd_req() => inet_csk_search_req() => tcp_check_req()
+                                如果一切OK,并且listen backlog,也就是icsk_accept_queue没有overflow,就把这个sock加到icsk_accept_queue
+                                如果overflow了,sysctl_tcp_abort_on_overflow的话,RESET,否则返回NULL.
+                                返回NULL的情况下,那么这个packet就丢掉了
+
+                                test-backlog-queue 实测结果:
+                                　设backlog为2,server　accept 1个连接去处理后,还可以再接受3个连接(backlog queue?), 
+                                　第4个连接时, client回复ACK后, server还是会不停地重发 SYN_ACK, 就好像没有收到client的ACK一样. 这也就验证了上边说的backlog overflow的话, ACK packet丢掉的情况.
+                                　这也就是说backlog的大小实际上是listen()参数加1
+                                　对于丢掉了ACK packet的那个连接,client之后向server发送数据时,会PUSH ACK,server还能收到.
                           */
     ap_mpm_pod_open();  // create了一个pipe,并且closeonexec,不知道做什么用的
 </code></pre>

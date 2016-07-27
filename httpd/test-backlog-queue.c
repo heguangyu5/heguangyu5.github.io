@@ -8,6 +8,8 @@
 int main(void)
 {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
+    int optval = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(struct sockaddr_in));
