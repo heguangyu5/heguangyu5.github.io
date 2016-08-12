@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">gcc -O</h1>
+<pre><code class="language-c">#include &lt;stdio.h&gt;
+#include &lt;pthread.h&gt;
+
+int g;
+
+void *func(void *arg)
+{
+    int i = 1000000;
+    while (i--) g++;
+    return NULL;
+}
+
+int main(void)
+{
+    pthread_t t1, t2;
+
+    pthread_create(&t1, NULL, func, NULL);
+    pthread_create(&t2, NULL, func, NULL);
+
+    pthread_join(t1, NULL);
+    pthread_join(t2, NULL);
+
+    printf("g = %d\n", g);
+
+    return 0;
+}
+</code></pre>
+
+<h3>gcc -O0</h3>
+<pre><code class="language-bash">gcc -Wall -O0 a.c -lpthread
+objdump -d a.out
+00000000004005f4 &lt;func&gt;:
+  4005f4:	55                   	push   %rbp
+  4005f5:	48 89 e5             	mov    %rsp,%rbp
+  4005f8:	48 89 7d e8          	mov    %rdi,-0x18(%rbp)
+  4005fc:	c7 45 fc 40 42 0f 00 	movl   $0xf4240,-0x4(%rbp)
+  400603:	eb 0f                	jmp    400614 &lt;func+0x20&gt;
+  400605:	8b 05 35 0a 20 00    	mov    0x200a35(%rip),%eax        # 601040 &lt;g&gt;
+  40060b:	83 c0 01             	add    $0x1,%eax
+  40060e:	89 05 2c 0a 20 00    	mov    %eax,0x200a2c(%rip)        # 601040 &lt;g&gt;
+  400614:	83 7d fc 00          	cmpl   $0x0,-0x4(%rbp)
+  400618:	0f 95 c0             	setne  %al
+  40061b:	83 6d fc 01          	subl   $0x1,-0x4(%rbp)
+  40061f:	84 c0                	test   %al,%al
+  400621:	75 e2                	jne    400605 &lt;func+0x11&gt;
+  400623:	b8 00 00 00 00       	mov    $0x0,%eax
+  400628:	5d                   	pop    %rbp
+  400629:	c3                   	retq
+</code></pre>
+<code>mov mem, %eax;</code><br>
+<code>add $1, %eax;</code><br>
+<code>mov %eax, mem;</code><br>
+
+<h3>gcc -O1</h3>
+<pre><code class="language-bash">gcc -Wall -O1 a.c -lpthread
+objdump -d a.out
+0000000000400614 &lt;func&gt;:
+  400614:	8b 15 26 0a 20 00    	mov    0x200a26(%rip),%edx        # 601040 &lt;g&gt;
+  40061a:	b8 40 42 0f 00       	mov    $0xf4240,%eax
+  40061f:	83 e8 01             	sub    $0x1,%eax
+  400622:	75 fb                	jne    40061f &lt;func+0xb&gt;
+  400624:	8d 82 40 42 0f 00    	lea    0xf4240(%rdx),%eax
+  40062a:	89 05 10 0a 20 00    	mov    %eax,0x200a10(%rip)        # 601040 &lt;g&gt;
+  400630:	b8 00 00 00 00       	mov    $0x0,%eax
+  400635:	c3                   	retq
+</code></pre>
+<code>mov mem, %edx;</code><br>
+<code>lea 0xf4240(%rdx), %eax;</code><br>
+<code>mov %eax, mem;</code><br><br>
+<p>The LEA instruction is related to the MOV instruction, which copies data from a memory location to a
+register, but LEA takes the address of the source operand, whereas MOV takes the contents of the
+memory location specified by the source operand.
+</p>
+
+<h3>gcc -O2</h3>
+<pre><code class="language-bash">gcc -Wall -O2 a.c -lpthread
+objdump -d a.out
+0000000000400680 &lt;func&gt;:
+  400680:	81 05 b6 09 20 00 40 	addl   $0xf4240,0x2009b6(%rip)        # 601040 &lt;g&gt;
+  400687:	42 0f 00
+  40068a:	31 c0                	xor    %eax,%eax
+  40068c:	c3                   	retq
+  40068d:	90                   	nop
+  40068e:	90                   	nop
+  40068f:	90                   	nop
+</code></pre>
+<code>add $0xf4240, mem;</code><br>
+
+<h3>gcc -O3 | -Os | -Ofast</h3>
+结果同-O2
+
+
+<h3>两个线程最终的运行结果</h3>
+在单核机器上,结果始终都是200W.<br>
+<span class="text-red">猜想是因为func在kernel分配的时间片没用完前就结束了,两个线程实际上是一先一后就结束了.</span>
+把循环次数加大到1亿,可看到-O0和-O1的结果不再是2亿.但-O2的结果始终是两亿.<br><br>
+
+在多核机器上,100W次循环,-O0和-O1的结果都不是200W,但-O2的结果始终是200W.<br>
+将循环次数增加到1000亿,此时会变成两条指令,一个是mov $1000亿 %rax, 然后 add %rax, mem. 但结果还是2000亿.<br>
+<span class="text-red">什么情况下 add $0xXXX, mem 才会需要lock?</span>
+
+
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+</div>
+<script src="prism.js"></script>
+</body>
+</html>
