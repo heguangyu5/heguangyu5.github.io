@@ -26,6 +26,136 @@ struct _php_core_globals core_globals; // main/php_globals.h#0056
 # define PG(v) (core_globals.v)
 
 // main函数入口: sapi/cli/php_cli.c#1164
+argv = save_ps_args(argc, argv);
+    // 首先确认argv,env的字符串是在一块的,在看linux内核里,我们知道一个进程的stack组织是这样的: 
+    // argc + argv ptr + env ptr + elf_info ...+ argv strings + env string + filename
+    // ps_buffer = [argv ... env]
+    // 把env string复制两份,一份是new_environ,一份是forzen_environ, 并且environ = new_environ
+    // 把argv string复制一份,返回
+cli_sapi_module.additional_functions = {
+    dl,                    // ext/standard/dl.c
+    cli_set_process_title, // 没错,就是直接修改stack上argv[0]的那部分内存,save_ps_args已经把argv,env都复制了,所以可以放心修改
+    cli_get_process_title
+}
+
+sapi_module->ini_defaults = sapi_cli_ini_defaults;      // report_zend_debug=0,display_errors=1
+sapi_module->php_ini_path_override = ini_path_override; // NULL
+sapi_module->phpinfo_as_text = 1;
+sapi_module->php_ini_ignore_cwd = 1;
+sapi_startup(sapi_module);
+    sapi_module->ini_entries = NULL;
+    sapi_globals_ctor(); // known_post_content_types(xxx-urlencoded,multipart)
+sapi_module->php_ini_ignore = ini_ignore;
+sapi_module->executable_location = argv[0];
+/* HARDCODED_INI
+    html_errors=0
+    register_argc_argv=1
+    implicit_flush=1
+    output_buffering=0
+    max_execution_time=0
+    max_input_time=-1
+*/
+sapi_module->ini_entries = ini_entries;
+sapi_module->startup(); => php_cli_startup(); => php_module_startup(cli_sapi_module, additional_modules = NULL, 0);
+    sapi_initialize_empty_request(); // SG(server_context) = NULL, SG(request_info) = NULL
+    sapi_activate();
+        SG(sapi_headers).send_default_content_type = 1;
+                        .http_status_line = NULL;
+                        .mimetype = NULL;
+                        .headers_sent = 0;
+                        ...
+    php_output_startup();
+    php_startup_ticks();  // 初始化几个链表
+    gc_globals_ctor();    // 初始化gc_globals
+    zend_startup(zend_utility_functions, extentions = NULL);
+        start_memory_manager(); // alloc_globals
+        virtual_cwd_startup();  // 不清楚做什么用的
+        zend_startup_strtod();  // 什么都没做
+        zend_startup_extensions_mechanism(); // 初始化zend_extensions链表
+        // 给一堆zend_* function赋值
+        zend_init_opcodes_handlers(); // zend_opcode_handlers = {HANDLERS}
+        zend_version_info = ZEND_CORE_VERSION_INFO;
+        GLOBAL_FUNCTION_TABLE       // HashTable 1024
+        GLOBAL_CLASS_TABLE          // HashTable 64
+        GLOBAL_AUTO_GLOBALS_TABLE   // HashTable 8
+        GLOBAL_CONSTANTS_TABLE      // HashTable 128
+        module_registry             // HashTable 32
+        ini_scanner_globals
+        language_scanner_globals
+        zend_set_default_compile_time_values();
+            CG(short_tags) = short_tags_default = 1;
+            CG(compiler_options) = compiler_options_default = ZEND_COMPILE_HANDLE_OP_ARRAY;
+        EG(error_reporting) = E_ALL & ~E_NOTICE;
+        zend_interned_strings_init();
+        zend_startup_builtin_functions();
+            zend_builtin_module.module_number = 0;
+                               .type = MODULE_PRESISTENT;
+            zend_register_module_ex(&zend_builtin_module);
+                zend_hash_add_mem(&module_registry, "core", &zend_builtin_module);
+                zend_register_functions(
+                    zend_class_entry *scope = NULL,
+                    zend_function_entry *functions = module->functions, // builtin_functions
+                    HashTable *function_table = NULL,
+                    int type = module->type                             // MODULE_PRESISTENT
+                );
+                // MODULE_PRESISTENT E_CORE_WARNING, else E_WARNING
+                // if (function_table == NULL) function_table = CG(function_table)
+        zend_register_standard_constants(); // E_ERROR,E_ALL,TRUE,FALSE,NULL...
+        zend_register_auto_global("GLOBALS");
+            zend_hash_add_mem(CG(auto_globals), "GLOBALS");
+        zend_ini_startup();
+            registered_zend_ini_directives = HashTable 128
+    // register constants: PHP_VERSION, PHP_MAJOR_VERSION, PHP_SAPI
+    php_binary_init(); // 找到php可执行文件的完整路径
+    // register constant PHP_BINARY
+    php_output_register_constants();  // PHP_OUTPUT_HANDLER_START/WRITE/.../END
+    php_rfc1867_register_constants(); // UPLOAD_ERR_OK/NO_FILE/...
+    php_init_config();
+        configuration_hash;
+        sapi_module.ini_defaults(&configuration_hash); => sapi_cli_ini_defaults(); // report_zend_debug = 0, display_errors = 1
+        // php.ini所在目录是在./configure时定下来的,除了这个目录外,php可执行文件所在的目录也算
+        // 首先找php-%sapi-module-name%.ini,如果找不到,再找php.ini
+        zend_parse_ini_file();
+        // 再遍历scandir目录,找到其中的ini文件, parse
+        // 最后,把sapi_module.ini_entries加到configuration_hash里
+    REGISTER_INI_ENTRIES(); => zend_register_ini_entries(ini_entries, module_number);
+    zend_register_standard_ini_entries(); // 没搞明白哪儿来的ini_entries
+    php_init_stream_wrappers(module_number = 0);
+    php_startup_auto_globals(); // _GET, _POST, _COOKIE, _SERVER, _ENV, _REQUEST, _FILES
+    php_startup_sapi_content_types();
+        sapi_module.default_post_reader = php_default_post_reader;
+        sapi_module.treat_data = php_default_treat_data;
+        sapi_module.input_filter = php_default_input_filter;
+        sapi_module.input_filter_init = NULL;
+    php_register_internal_extensions_func(); => php_register_internal_extensions();
+                                             => php_register_extensions(php_builtin_extensions, EXTCOUNT);
+                                             // standard,bcmatch,calendar,ftp,mbstring,pcre,session
+        zend_register_internal_module(zend_module_entry *module);
+            // 在module_registry里分配一个module_number, type = MODULE_PRESISTENT, 然后zend_register_module_ex(module);
+    php_register_extensions_bc(additional_modules, num_additional_modules); // cli下additional_modules=NULL
+    php_ini_register_extensions();
+        zend_load_extension(); -> dl -> zend_register_extension(zend_extension_entry);
+        php_load_extension();  -> dl -> get_module -> zend_register_module_ex(module_entry);
+    zend_startup_modules();
+        // sort, zend_startup_module_zval
+        zend_startup_module_ex(module);
+            module->globals_ctor();
+            module->module_startup_func();
+    zend_startup_extensions();
+        zend_extension_startup();
+            extention->startup();
+    zend_collect_module_handlers();
+        // 分配一大块内存,保存下有request_startup_func,request_shutdown_func,post_deactivate_func的module
+        // 再分配一大块内存,保存class with static members
+    // register additional_functions
+    php_disable_functions();
+    php_disable_classes(); // 把php.ini里配置的要禁用的func,class的handler分别指向display_disabled_function,display_disabled_class
+    zend_post_startup();
+        virtual_cwd_deactivate(); // 还是不清楚有什么用
+    // check deprecated directives
+    sapi_deactivate();
+    shutdown_memory_manager(1, 0);
+
 do_cli(argc, argv);
     cli_seek_file_begin(&file_handle, script_file, &lineno);
     php_request_startup();
@@ -256,6 +386,159 @@ argument_list:
     opcode = ZEND_INIT_FCALL
     handler = 61 * 25 + 3 * 5 + 0 = ZEND_INIT_FCALL_SPEC_CONST_HANDLER
 */
+</code></pre>
+
+<h3>_zend_op</h3>
+<pre><code class="language-c">struct _zend_op {
+    znode_op    op1;
+    zend_uchar  op1_type;
+    znode_op    op2;
+    zend_uchar  op2_type;
+    zend_uchar  opcode;
+    const void  *handler;
+
+    uint32_t    extended_value;
+    uint32_t    lineno;
+
+    znode_op    result;
+    zend_uchar  result_type;
+};
+typedef union _znode_op {
+    uint32_t constant;
+    uint32_t var;
+    uint32_t num;
+    uint32_t opline_num;
+    uint32_t jmp_offset;
+} znode_op;
+
+result = handler(op1, op2);
+union znode_op有5种可能,op1_type,op2_type,result_type分别指明.
+遍历每各可能出现的情况,一个opcode会有25个对应的handler.把这25个handler写到数组里,那么已知op1,op2的type,对应的handler是:
+
+zend_opcode_handlers[opcode * 25 + op1_type * 5 + op2_type]
+
+
+struct _zend_op_array {
+    ...
+
+    uint32_t last;
+    zend_op  *opcodes;
+
+    ...
+};
+
+分配一大块内存,当作数组存储zend_op. _zend_op_array.opcodes指向内存的开始,opcodes + last 指向下一个可用的zend_op.
+
+pass_two遍历op_array,根据上边的计算公式,找到对应的handler.
+
+那么op1,op2的type是怎么得到的呢? compile ast 时得到的.
+</code></pre>
+
+<h3>php</h3>
+
+<h3>php-fpm</h3>
+@see http://www.mit.edu/~yandros/doc/specs/fcgi-spec.html
+<pre><code class="language-c">// sapi/fpm/fpm/fpm_main.c
+static sapi_module_struct cgi_sapi_module = {
+    char *name;                         // fpm-fcgi
+    char *pretty_name;                  // FPM/FastCGI
+
+    int (*startup)();                   // php_cgi_startup
+    int (*shutdown)();                  // php_module_shutdown_wrapper
+
+    int (*activate)();                  // sapi_cgi_activate
+    int (*deactivate)();                // sapi_cgi_deactivate
+
+    size_t (*ub_write)();               // sapi_cgibin_ub_write
+    void (*flush)();                    // sapi_cgibin_flush
+    zend_stat_t *(*get_stat)();         // NULL
+    char *(*getenv)();                  // sapi_cgibin_getenv
+
+    void (*sapi_error)();               // php_error
+
+    int (*header_handler)();            // NULL
+    int (*send_headers)();              // sapi_cgi_send_headers
+    void (*send_header)();              // NULL
+
+    size_t (*read_post)();              // sapi_cgi_read_post
+    char *(*read_cookies)();            // sapi_cig_read_cookies
+
+    void (*register_server_variables)(); // sapi_cgi_register_variables
+    void (*log_message)();               // sapi_cig_log_message
+    double (*get_request_time)();        // NULL
+    void (*terminate_process)();         // NULL
+
+    ...
+
+    char *ini_entries;
+};
+
+struct sapi_globals_struct {
+    void *server_context;
+    sapi_request_info request_info;
+    sapi_headers_struct sapi_headers;
+    int64_t read_post_bytes;
+    uint8_t post_read;
+    uint8_t headers_sent;
+    zend_stat_t global_stat;
+    char *default_mimetype;
+    char *default_charset;
+    HashTable *rfc1867_uploaded_files;
+    zend_long post_max_size;
+    int options;
+    zend_bool sapi_started;
+    double global_request_time;
+    HashTable known_post_content_types;
+    zval callback_func;
+    zend_fcall_info_cache fci_cache;
+};
+
+static zend_module_entry cgi_module_entry = {
+    STANDARD_MODULE_HEADER,
+    const char *name                                = "cgi-fcgi",
+    const struct _zend_function_entry *functions    = cgi_fcgi_sapi_functions,
+    int (*module_startup_func)()                    = PHP_MINIT(cgi),
+    int (*module_shutdown_func)()                   = PHP_MSHUTDOWN(cgi),
+    int (*request_startup_func)()                   = NULL,
+    int (*request_shutdown_func)()                  = NULL,
+    void (*info_func)()                             = PHP_MINFO(cgi),
+    NO_VERSION_YET,
+    STANDARD_MODULE_PROPERTIES
+};
+
+sapi_startup(); // sapi_globals.known_post_content_types = {
+                //          "application/x-www-form-urlencoded",
+                //          "multipart/form-data"
+                // }
+
+fcgi_init();
+    fcgi_mgmt_vars = {
+        FCGI_MPXS_CONNS = 0, // this application does not multiplex connections
+                             // (i.e. handle concurrent requests over each connection)
+    }
+    // 如果是daemon启动的话,把SIGUSR1,SIGTERM的handler设为fcgi_signal_handler
+
+cgi_sapi_module.startup(&cgi_sapi_module); => php_cgi_startup(&cgi_sapi_module);
+                                           => php_module_startup(&cgi_sapi_module, &cgi_module_entry, 1);
+
+fpm_init();
+    fpm_php_init_main();
+    fpm_stdio_init_main();
+    fpm_conf_init_main();
+    fpm_unix_init_main();
+    fpm_scoreboard_init_main();
+    fpm_pctl_init_main();
+    fpm_env_init_main();
+    fpm_signals_init_main();
+    fpm_children_init_main();
+    fpm_sockets_init_main();
+    fpm_worker_pool_init_main();
+    fpm_event_init_main();
+
+    fpm_conf_write_pid();
+    fpm_stdio_init_final();
+
+fcgi_fd = fpm_run(&max_requests = 500);
 </code></pre>
 
 </div>
