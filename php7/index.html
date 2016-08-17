@@ -27,7 +27,7 @@ struct _php_core_globals core_globals; // main/php_globals.h#0056
 
 // main函数入口: sapi/cli/php_cli.c#1164
 argv = save_ps_args(argc, argv);
-    // 首先确认argv,env的字符串是在一块的,在看linux内核里,我们知道一个进程的stack组织是这样的: 
+    // 首先确认argv,env的字符串是在一块的,在看linux内核时,我们知道一个进程的stack是这样组织的: 
     // argc + argv ptr + env ptr + elf_info ...+ argv strings + env string + filename
     // ps_buffer = [argv ... env]
     // 把env string复制两份,一份是new_environ,一份是forzen_environ, 并且environ = new_environ
@@ -73,6 +73,9 @@ sapi_module->startup(); => php_cli_startup(); => php_module_startup(cli_sapi_mod
         zend_startup_strtod();  // 什么都没做
         zend_startup_extensions_mechanism(); // 初始化zend_extensions链表
         // 给一堆zend_* function赋值
+        zend_compile_file = compile_file;
+        zend_execute_ex = execute_ex;
+        zend_execute_internal = NULL;
         zend_init_opcodes_handlers(); // zend_opcode_handlers = {HANDLERS}
         zend_version_info = ZEND_CORE_VERSION_INFO;
         GLOBAL_FUNCTION_TABLE       // HashTable 1024
@@ -127,10 +130,11 @@ sapi_module->startup(); => php_cli_startup(); => php_module_startup(cli_sapi_mod
         sapi_module.treat_data = php_default_treat_data;
         sapi_module.input_filter = php_default_input_filter;
         sapi_module.input_filter_init = NULL;
-    php_register_internal_extensions_func(); => php_register_internal_extensions();
-                                             => php_register_extensions(php_builtin_extensions, EXTCOUNT);
-                                             // standard,bcmatch,calendar,ftp,mbstring,pcre,session
-        zend_register_internal_module(zend_module_entry *module);
+    php_register_internal_extensions_func();
+        => php_register_internal_extensions();
+        => php_register_extensions(php_builtin_extensions, EXTCOUNT);
+            // standard,bcmatch,calendar,ftp,mbstring,pcre,session
+            zend_register_internal_module(zend_module_entry *module);
             // 在module_registry里分配一个module_number, type = MODULE_PRESISTENT, 然后zend_register_module_ex(module);
     php_register_extensions_bc(additional_modules, num_additional_modules); // cli下additional_modules=NULL
     php_ini_register_extensions();
@@ -158,7 +162,29 @@ sapi_module->startup(); => php_cli_startup(); => php_module_startup(cli_sapi_mod
 
 do_cli(argc, argv);
     cli_seek_file_begin(&file_handle, script_file, &lineno);
+    // 如果php脚本的第一行是#!,那么忽略掉第一行
     php_request_startup();
+        php_output_activate();
+        zend_activate();
+            gc_reset();
+            init_compiler();
+            init_executor();
+                EG(function_table) = CG(function_table);
+                EG(class_table) = CG(class_table);
+                zend_extensions -> extension->activate();
+            startup_scanner();
+        sapi_activate();
+        // output_handler
+        php_hash_environment();
+            zend_activate_auto_globals();
+        zend_activate_modules();
+            // 前边php_module_startup时,我们分配了一大块内存,保存了request_startup_func,request_shutdown_func,post_deactivate_func的module
+            // 这里调用这些module的request_startup_func
+        SG(sapi_started) = 1;
+    request_started = 1;
+    CG(start_lineno) = lineno; // 如果没有#!, = 1, 否则, = 2
+    zend_is_auto_global_str(ZEND_STRL("_SERVER"));
+        // 调用php_auto_globals_create_server();
     php_execute_script(&file_handle); // behavior = PHP_MODE_STANDARD;
 
 int php_execute_script(zend_file_handle *primary_file);
@@ -210,7 +236,7 @@ zend_op_array *compile_file(zend_file_handle *file_handle, int type);
      *  scanner 返回 "T_ECHO T_CONSTANT_ENCAPSED_STRING , T_CONSTANT_ENCAPSED_STRING"
      *  字符串在zendlval里, 正常应该是yylval,怎么变成zendlval的,不明白
      *
-     *  跟踪代码执行发现: zend_compile.c里调用lex_scan()来scan php源码,得到token及zendlval
+     *  跟踪代码执行发现: zend_compile.c里zendlex()调用lex_scan()来scan php源码,得到token及zendlval
      *                 在这里 T_CONSTANT_ENCAPSED_STRING => zend_parser_stack_elem.ast = zend_ast_create_zval(zendlval)
      *                 struct _zend_ast_zval {
      *                      zend_ast_kind kind = ZEND_AST_ZVAL,
@@ -380,8 +406,7 @@ argument_list:
                     zend_prefix_with_ns()
         zend_hash_find_ptr(CG(function_table), "phpinfo");
 
-    php里的function是怎么来的? zend_module_entry.functions 每个module public出来的function都在这里
-    php启动时会把它们加到function_table里?
+    前边我们知道,在php_module_startup时,把每个module的functions都加到funcation_table里了.
 
     opcode = ZEND_INIT_FCALL
     handler = 61 * 25 + 3 * 5 + 0 = ZEND_INIT_FCALL_SPEC_CONST_HANDLER
@@ -434,7 +459,6 @@ pass_two遍历op_array,根据上边的计算公式,找到对应的handler.
 那么op1,op2的type是怎么得到的呢? compile ast 时得到的.
 </code></pre>
 
-<h3>php</h3>
 
 <h3>php-fpm</h3>
 @see http://www.mit.edu/~yandros/doc/specs/fcgi-spec.html
