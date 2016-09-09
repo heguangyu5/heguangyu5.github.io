@@ -1,0 +1,35 @@
+<meta charset="utf-8">
+<style type="text/css">
+pre {border: 1px solid #CCC;padding:5px;background:#FAFAFA;}
+</style>
+
+<h4>1. tmpfs</h4>
+
+<pre>cd /home/heguangyu5/
+mkdir mytmpfs
+sudo mount -t tmpfs none mytmpfs
+</pre>
+
+<h4>2. mysql binary</h4>
+
+<pre>// @see http://dev.mysql.com/doc/refman/5.5/en/binary-installation.html
+sudo apt-get install libaio1
+cd Downloads
+axel -a -n 10 http://cdn.mysql.com//Downloads/MySQL-5.5/mysql-5.5.52-linux2.6-x86_64.tar.gz
+cd ../mytmpfs/
+cp ~/Downloads/mysql-5.5.52-linux2.6-x86_64.tar.gz .
+tar zxf mysql-5.5.52-linux2.6-x86_64.tar.gz
+rm mysql-5.5.52-linux2.6-x86_64.tar.gz
+mv mysql-5.5.52-linux2.6-x86_64/ mysql
+
+// 为什么不用系统自身安装的那个mysql?
+// ubuntu使用apparmor限制了/usr/sbin/mysqld可使用的资源
+
+cd mysql
+sudo chown -R mysql:mysql .
+sudo ./scripts/mysql_install_db --user=mysql --basedir=/home/heguangyu5/mytmpfs/mysql --datadir=/home/heguangyu5/mytmpfs/mysql/data --no-defaults
+sudo ./bin/mysqld_safe --no-defaults --user=mysql --port=3307 &
+mysqladmin --socket=/tmp/mysql.sock -uroot password '123456'
+mysql -h127.0.0.1 -uroot -p123456 -P3307
+mysqladmin --socket=/tmp/mysql.sock -uroot -p123456 shutdown
+</pre>
