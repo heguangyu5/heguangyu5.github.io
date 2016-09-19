@@ -545,24 +545,128 @@ fcgi_init();
 cgi_sapi_module.startup(&cgi_sapi_module); => php_cgi_startup(&cgi_sapi_module);
                                            => php_module_startup(&cgi_sapi_module, &cgi_module_entry, 1);
 
+
+// @see http://localhost/lxr/source/sapi/fpm/fpm/fpm_arrays.h?v=php-7.0.4
+struct fpm_array_s {
+    void *data;
+    size_t sz;
+    size_t used;
+    size_t allocated;
+};
+// sz表示数组中单个元素的大小,allocated表示当前data里可以存放多少个元素,used表示已经用了几个了.
+// fpm_array_init(array, sz, initial_num) 分配sz*initial_num大小的内存,赋值给data,完成初始化
+// fpm_array_item(array, idx) 返回idx处的元素 a->data + a->sz * idx
+// fpm_array_item_last(array) => fpm_array_item(array, a->used - 1)
+// fpm_array_item_remove(array, idx) 用最后一个元素覆盖掉要删除的idx处的元素
+// fpm_array_push(array) 如果之前分配的内存用完了,realloc一下,然后返回下一个元素的位置
+// fpm_array_free(array) free(a->data)
+
+
 fpm_init();
     fpm_php_init_main();
+        // fpm_cleanup_add(FPM_CLEANUP_PARENT, fpm_php_cleanup, 0)
+        // 看下边的fpm_worker_pool_init_main()
     fpm_stdio_init_main();
+        // 把STDIN_FILENO,STDOUT_FILENO重定向到/dev/null
     fpm_conf_init_main();
+        // 找到 php-fpm.conf
+        fpm_conf_load_ini_file("php-fpm.conf");
+            // 从fpm_conf_ini_parser()可以看出,php-fpm.conf分成两大部分,
+            // 一部分是global options,另一部分是worker_pool conf, 其中global部分不能有array的conf
+            // 看下默认的php-fpm.conf可以知道,最开始遇到的是[global] section
+            // global section支持的配置项定义在ini_fpm_global_options数组中,每一项都有对应的处理函数
+            // 最终conf的配置都保存到了fpm_global_config里
+            // global section的最后include了php-fpm.d里的pool conf,每遇到一个pool,就分配一个fpm_worker_pool_s,
+            // 当然还有一个对应的fpm_worker_pool_config_s,然后把这个新pool加到fpm_woker_all_pools里去.
+            // pool支持的配置项定义在ini_fpm_pool_options里,每一项都有对应的处理函数
+            // 最终pool conf的配置都保存到了对应pool的config里
+            // pool conf支持array,当前支持这几个: env, php_value, php_admin_value, php_flag, php_admin_flag
+        fpm_conf_post_process(force_daemon);
+            // 检查配置项是否正确,并打开log
+        // 如果是在test_config,返回退出,否则
+        fpm_cleanup_add(FPM_CLEANUP_ALL, fpm_conf_cleanup, 0);
     fpm_unix_init_main();
+        // 如果daemonize的话,fork出一个child作为master process,并通过管道接收master的启动状态,
+        // 没有什么问题的话,master要返回1,当前的这个进程到此就退出了.
+        // child作为master process继续运行,把fpm_globals.parent_pid设为自己的pid.
+        // 然后遍历每一个worker pool,调用fpm_unix_conf_wp()
+        // fpm_unix_conf_wp()根据当前用户的身份(是不是root),设定wp的uid,gid
     fpm_scoreboard_init_main();
+        // map出一块SHARED的内存,用于记录每个child的运行状态
     fpm_pctl_init_main();
+        // 将argv另存一份
     fpm_env_init_main();
+        // 将master进程的argv[0]设为master process (config)
     fpm_signals_init_main();
+        // 开一个socketpair,master process收到signal后,write到socket里去
     fpm_children_init_main();
+        // fpm_cleanup_add(FPM_CLEANUP_ALL, fpm_children_cleanup, 0)
     fpm_sockets_init_main();
+        // 关于getenv("FPM_SOCKETS")还不清楚是怎么回事
+        // 遍历worker pool, socket() -> bind() -> listen(),然后把socket fd保存到sockets_list里
+        // fpm_cleanup_add(FPM_CLEANUP_ALL, fpm_sockets_cleanup, 0)
     fpm_worker_pool_init_main();
+        // fpm使用fpm_array_s保存一系列的cleanup function
+        // worker_pool_init_main()给这个array添加了一个type=FPM_CLEANUP_ALL,function=fpm_worker_pool_cleanup的元素
+        // 需要时可以调用fpm_cleanups_run(type)运行array里指定type的function,
+        // 不过这个函数的实现好像有问题,它在运行完指定type的function后,就把array给free掉了,
+        // 这也就是说,这个array里的元素必须是一个type的
     fpm_event_init_main();
-
+        // select/poll/epoll init
+        // fpm_cleanup_add(FPM_CLEANUP_ALL, fpm_event_cleanup, NULL)
     fpm_conf_write_pid();
+        // 把master process的pid写的php-fpm.conf指定的pid_file里
     fpm_stdio_init_final();
 
-fcgi_fd = fpm_run(&max_requests = 500);
+fcgi_fd = fpm_run();
+    // 遍历worker pool, 对每一个pool调用fpm_children_create_initial() => fpm_children_make();
+    // fpm_children_make()根据worker pool的配置,fork出指定数量的children
+    // 然后master进程就进入了fpm_event_loop(0);
+    // 前边fpm_signals_init_main()时开了一个socketpair,fpm_event_loop()监控socketpair[0],有数据可读取时读出来,处理不同的signal
+    // SIGCHLD  -> fpm_children_bury()
+    // SIGINT   -> FPM_PCTL_STATE_TERMINATING
+    // SIGTERM  -> FPM_PCTL_STATE_TERMINATING
+    // SIGQUIT  -> FPM_PCTL_STATE_FINISHING
+    // SIGUSR1  -> reopen error log, access log
+    // SIGUSR2  -> FPM_PCTL_STATE_RELOADING
+    fpm_child_init();
+        fpm_stdio_init_child();
+            // 将STDIN设为listening_socket
+        fpm_log_init_child();
+        fpm_status_init_child();
+            // 赋值fpm_status_uri,fpm_status_ping_uri,fpm_status_ping_response
+        fpm_unix_init_child();
+            // 执行setuid, setgid, chroot, chdir
+        fpm_signals_init_child();
+            // 将SIGQUIT的handler设为sig_soft_quit,其它的设为SIG_DFL
+        fpm_env_init_child();
+            // argv[0] = pool POOL_NAME
+            // setenv USER,HOME
+        fpm_php_init_child();
+            // fpm_php_apply_defines, fpm_php_set_allowed_clients, limit_extensions
+    // 最终child返回listening_socket
+
+request = fpm_init_request(fcgi_fd);
+    fcgi_init_request();
+        req->listen_socket  = fcgi_fd;
+        req->hook.on_accept = fpm_request_accepting;
+        req->hook.on_read   = fpm_request_reading_headers;
+        req->hook.on_close  = fpm_request_finished;
+fcgi_accept_request(request);
+    request->hook.on_accept(); => fpm_request_accepting(); // update scoreboard
+    request->fd = accept(listen_socket, &sa, &len); // 多个children要accept(),显然像apache一样要有个lock
+    // accept后检查client是否被禁掉
+    fpm_request_reading_headers(); // update scoreboard
+    fcgi_read_request();
+        // 首先,读取一个fcgi_header.
+        // 这里的safe_read()一直等到读取到完整的fcgi_header才返回,就不怕恶意攻击?
+        // FCGI_BEGIN_REQUEST确定ROLE, FCGI_PARAMS接收header, ROLE和header都放到了request->env里
+SG(server_context) = (void *)request;
+init_request_info();
+fpm_request_info(); // update scoreboard
+fpm_request_executing(); // update scoreboard
+php_execute_script(&file_handle);
+fpm_request_end(); // update scoreboard
 </code></pre>
 
 </div>
