@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="../prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">mysql-5.5.53 Replication</h1>
+
+<h3>在一台机器上启动多个mysqld</h3>
+
+<p>关键在于配置项pid-file,socket,port,basedir,datadir</p>
+
+master.cnf
+<pre>
+[client]
+port = 3307
+socket = /tmp/mysqld-master.sock
+
+[mysqld_safe]
+socket = /tmp/mysqld-master.sock
+
+[mysqld]
+user = mysql
+pid-file = /tmp/mysqld-master.pid
+socket = /tmp/mysqld-master.sock
+port = 3307
+basedir = /home/heguangyu5/Downloads/mysql
+datadir = /home/heguangyu5/Downloads/mysql/data-master
+
+log-bin = mysql-bin
+server-id = 1
+
+innodb_flush_log_at_trx_commit = 1
+sync_binlog = 1
+</pre>
+
+slave.cnf
+<pre>
+[client]
+port = 3308
+socket = /tmp/mysqld-slave.sock
+
+[mysqld_safe]
+socket = /tmp/mysqld-slave.sock
+
+[mysqld]
+user = mysql
+pid-file = /tmp/mysqld-slave.pid
+socket = /tmp/mysqld-slave.sock
+port = 3308
+basedir = /home/heguangyu5/Downloads/mysql
+datadir = /home/heguangyu5/Downloads/mysql/data-slave
+
+server-id=2
+</pre>
+
+<p>
+先使用 <code>mysql_install_db --defaults-file=xxx.cnf</code> 生成data目录的基础数据，
+然后 <code>mysqld_safe --defaults-file=xxx.cnf &</code> 启动.
+</p>
+mysqld_safe启动有个问题是和当前终端绑定,查看 <code>/etc/init/mysql.cnf</code> 可知,ubuntu是直接使用/usr/sbin/mysqld启动的.
+
+
+<h3>init_slave()</h3>
+<pre><code class="language-c">// mysqld的main入口在 sql/main.cc 里.
+// mysqld_main() 里调用 init_slave() 启动master的binlog dump thread
+
+init_slave();
+    active_mi = new Master_info();
+    init_master_info(
+        active_mi,
+        "master.info",
+        relay_log_info_file,
+        abort_if_no_master_file = 1,
+        SLAVE_IO | SLAVE_SQL
+    );
+    // 对于 master 来说,由于data目录里没有master.info,所以init_master_info()早早就返回了,
+    //                 并且active_mi->host[0] == 0, 所以下边也没有start_slave_threads,然后就返回了
+    // 对于 slave 来说,init_master_info()会读取data目录里的master.info,取到master的host,port,user,passwd等
+    //                 此时active_mi->host[0] != 0,所以接着会start_slave_threads
+
+start_slave_threads();
+    start_slave_thread(handle_slave_io);
+    start_slave_thread(handle_slave_sql);
+    
+handle_slave_io();
+    // connect to master
+    // COM_REGISTER_SLAVE
+    while (!io_slave_killed()) {
+        request_dump(); // request binlog dump => send COM_BINLOG_DUMP
+        while (!io_slave_killed()) {
+            read_event();
+        }
+    }
+handle_slave_sql(); => exec_relay_log_event();
+</code></pre>
+
+<h3>handle_connections_sockets()</h3>
+<pre><code class="language-c"> // accept socket
+// new THD
+// socket to vio
+// thd->net => vio
+create_new_thread(THD);
+    MYSQL_CALLBACK(thread_scheduler, add_connection, (thd));
+// 对于connections的处理,有两种办法,一种是一个thread处理一个conn,另一种是只有一个tread,处理所有conn
+do_handle_one_connection();
+    while (thd_is_connection_alive(thd)) {
+        do_command(thd);
+    }
+
+do_command();
+    my_net_set_read_timeout(net, thd->variables.net_wait_timeout);
+dispatch_command();
+    COM_REGISTER_SLAVE:
+        register_slave();
+    COM_BINLOG_DUMP:
+        mysql_binlog_send();
+</code></pre>
+
+OK,主从复制基本上搞清楚了,slave连接到master,master开一个binlog dump线程,如果没有binlog可传输的,binlog dump线程就挂起,wait log_cond,当binlog被更新时,binlog dump线程被唤醒,read log event并传给slave.
+
+</div>
+<script src="../prism.js"></script>
+</body>
+</html>

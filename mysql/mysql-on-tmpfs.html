@@ -26,10 +26,28 @@ mv mysql-5.5.52-linux2.6-x86_64/ mysql
 // ubuntu使用apparmor限制了/usr/sbin/mysqld可使用的资源
 
 cd mysql
-sudo chown -R mysql:mysql .
-sudo ./scripts/mysql_install_db --user=mysql --basedir=/home/heguangyu5/mytmpfs/mysql --datadir=/home/heguangyu5/mytmpfs/mysql/data --no-defaults
-sudo ./bin/mysqld_safe --no-defaults --user=mysql --port=3307 &
-mysqladmin --socket=/tmp/mysql.sock -uroot password '123456'
+sudo chown -R mysql:mysql ./data
+
+vi my.cnf
+[client]
+port = 3307
+socket = /tmp/mysqld.sock
+
+[mysqld_safe]
+socket = /tmp/msyqld.sock
+
+[mysqld]
+user = mysql
+pid-file = /tmp/mysqld.pid
+socket = /tmp/mysqld.sock
+port = 3307
+basedir = /home/heguangyu5/mytmpfs/mysql
+datadir = /home/heguangyu5/mytmpfs/mysql/data
+
+sudo ./scripts/mysql_install_db --defaults-file=my.cnf
+sudo ./bin/mysqld_safe --defaults-file=my.cnf &
+mysqladmin --defaults-file=my.cnf -uroot password '123456'
+
 mysql -h127.0.0.1 -uroot -p123456 -P3307
-mysqladmin --socket=/tmp/mysql.sock -uroot -p123456 shutdown
+mysqladmin --defaults-file=my.cnf -uroot -p123456 shutdown
 </pre>
