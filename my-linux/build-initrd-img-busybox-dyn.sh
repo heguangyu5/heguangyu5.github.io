@@ -3,6 +3,11 @@
 mkdir tmp_initrd_dir
 cd tmp_initrd_dir
 
+cp ../tools/test-transparent-hugepage-mmap ./
+cp ../tools/test-transparent-hugepage-mmap-madvise ./
+cp ../tools/test-transparent-hugepage-posix-memalign ./
+cp ../tools/test-transparent-hugepage-posix-memalign-madvise ./
+cp ../tools/test-transparent-hugepage-posix-memalign-madvise-1g ./
 mkdir -p bin dev usr/sbin usr/bin sbin proc sys
 cd dev
 sudo mknod tty c 5 0

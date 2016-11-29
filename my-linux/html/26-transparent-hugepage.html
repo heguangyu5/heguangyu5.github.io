@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../../bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="../../prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">transparent hugepage</h1>
+
+@see Documentation/vm/transhuge.txt
+
+<h3>怎么判断kernel确实给我们分配了一大块内存?</h3>
+<p>
+    1. 修改build-initrd-img-busybox-dyn.sh把测试程序copy到initrd img里<br>
+    2. bochs启动到busybox的shell里<br>
+    3. bochs gui debugger里设breakpoint,查Sysmap可知do_execve的地址. <code>b 0x1166000</code><br>
+    4. 在busybox的shell里运行测试程序,当执行到 <code>do_execve(char *filename, char *argv, char *envp, pt_regs)</code> 时会break住,查看%rdi的内容可确定是在执行测试程序.<br>
+    5. 再设breakpoint,查Sysmap可知vfs_write的地址. <code>b 0x115f130</code><br>
+    6. <code>vfs_write(struct file *file, char *buf, size_t count, loff_t *pos)</code>, 查看%rsi的内容可确定执行到正确的位置.<br>
+    7. 从%cr3里得到当前的pgd,运行 <code>tools/calc-pgt addr</code> 得到page table的情况,一路查下去pgd->pud->pmd->pte可知当前page table entry还没有,此时仅仅是在进程的process address space里做了标记而已.<br>
+    8. 继续执行,再次break到vfs_write.同样查看%rsi的内容可确定执行到正确的位置.再查看page table, entry已经有了.<br>
+</p>
+
+<h3>结论</h3>
+<pre><code class="language-bash">cat /sys/kernel/mm/transparent_hugepage/enabled
+always [madvise] never</code></pre>
+1. 简单的mmap不会分配大块内存,还是4K,4K的分配的 <br>
+2. 使用posix_memalign也一样,还是4K,4K分配的 <br>
+3. mmap后计算出对齐到2M的内存地址及余下的整2M的空间,调用 <code>madvise(addr_aligned, length, MADV_HUGEPAGE)</code>,kernel此时会分配大块内存(2M)<br>
+4. 使用posix_memalign拿到一个对齐到2M的地址,再调用madvise,此时kernel会分配大块内存(2M)<br>
+5. 使用posix_memalign拿到一个对齐到1G的地址,再调用madvise,此时kernel依旧分配2M大小的内存,而不会分配1G的. (要想测试这种情况,.bochsrc要调整一下 memory: guest=20480, host=2048, bochs限制host_size最大2048,没有找到在哪里能调整)<br>
+
+
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+</div>
+<script src="../../prism.js"></script>
+</body>
+</html>
