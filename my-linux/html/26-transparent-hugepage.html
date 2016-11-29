@@ -35,6 +35,7 @@ always [madvise] never</code></pre>
 3. mmap后计算出对齐到2M的内存地址及余下的整2M的空间,调用 <code>madvise(addr_aligned, length, MADV_HUGEPAGE)</code>,kernel此时会分配大块内存(2M)<br>
 4. 使用posix_memalign拿到一个对齐到2M的地址,再调用madvise,此时kernel会分配大块内存(2M)<br>
 5. 使用posix_memalign拿到一个对齐到1G的地址,再调用madvise,此时kernel依旧分配2M大小的内存,而不会分配1G的. (要想测试这种情况,.bochsrc要调整一下 memory: guest=20480, host=2048, bochs限制host_size最大2048,没有找到在哪里能调整)<br>
+6. mmap后直接调用madvise,不计算对齐后的地址,然后当使用这块内存时,刚开始的前边一小部分是4K,4K分配的,后边对齐到2M后就是2M,2M分配的了.果真是transparent hugepage.<br>
 
 
 <br>

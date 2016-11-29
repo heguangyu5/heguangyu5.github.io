@@ -5,6 +5,7 @@ cd tmp_initrd_dir
 
 cp ../tools/test-transparent-hugepage-mmap ./
 cp ../tools/test-transparent-hugepage-mmap-madvise ./
+cp ../tools/test-transparent-hugepage-mmap-madvise-no-align ./
 cp ../tools/test-transparent-hugepage-posix-memalign ./
 cp ../tools/test-transparent-hugepage-posix-memalign-madvise ./
 cp ../tools/test-transparent-hugepage-posix-memalign-madvise-1g ./
