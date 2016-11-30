@@ -177,6 +177,10 @@ process_update_command(c, tokens, ntokens, comm, false);
     // 接下来就是从client读取数据放到chunk里边了,当数据读取完毕后,complete_nread
     complete_nread_ascii();
     // 插入hashtable就完了
+    // CAS id是个什么东西?
+    // @see get_cas_id(). cas id就是个uint64_t的整数,从1开始
+    // CAS id是在什么时间生成的?
+    // 在插入hashtable前,生成并设到item header里. @see do_item_link()
 // cas
 process_update_command(c, tokens, ntokens, comm, true);
 // incr
