@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="../prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">memcached 1.4.33</h1>
+
+<h3>main()</h3>
+<pre><code class="language-c">sanitycheck(); // memcached至少需要libevent 1.3
+
+signal(SIGINT, sig_handler);
+signal(SIGTERM, sig_handler); // 这个sig_handler非常简单,只是打印出收到的signal,然后退出
+
+settings.init(); // num_threads = 4; maxconns = 1024; maxbytes = 64MB;
+
+init_lru_crawler();
+init_lru_maintainer();
+
+hash_init(hash_type = "jenkins" OR "murmur3"); // 确定使用哪个hash算法
+
+// 默认listen tcp/udp port 11211,如果同时使用命令行参数-p -U可更改这两个port,如果仅使用一个参数,则另一个参数也会随着被修改
+// 当以root用户启动时,可以使用-u参数切到其它帐户运行
+// memcached默认在前台运行,可以通过参数-d使其daemonize
+// -k lock_memory (man getrlimit RLIMIT_MEMLOCK) 不清楚怎么回事?
+
+static struct event_base *main_base = event_init();
+// @see http://www.wangafu.net/~nickm/libevent-book/Ref2_eventbase.html Obsolete event_base functions
+
+logger_init();
+    start_logger_thread();
+
+stats_init();
+    // stats,stats_state,prefix_stats清0
+    // stats_state.accepting_conns = true;
+    // process_started = time(0) - 60 - 2;
+
+assoc_init(settings.hashpower_init = 0 );
+    primary_hashtable = calloc(1 &lt;&lt; 16 = 65536, sizeof(void *));
+    stats_state.hash_power_level = 16;
+    stats_state.hash_bytes       = 65536 * sizeof(void *) = 512K
+
+conn_init();
+    struct conn **conns = calloc(settings.maxconns = 1024, sizeof(struct conn *));
+
+slabs_init(settings.maxbytes = 64MB, settings.factor = 1.25, preallocate = false, slab_sizes = NULL);
+    mem_limit = 64MB;
+    #define CHUNK_ALIGN_BYTES 8
+    #define MAX_NUMBER_OF_SLAB_CLASSES (63 + 1)
+    settings.chunk_size = 48;
+    settings.slab_page_size = 1024 * 1024;
+    settings.slab_chunk_size_max = settings.slab_page_size;
+
+    // 把内存看成一个个slab class,每个slab class最大1M(slab_chunk_size_max),slab class里再细分成很多chunk,
+    // chunk的大小由小变大,显然chunk数由多变少.
+    // chunk大小增长的facotr默认为1.25,最多可以有63个slab class,如果还没到63,chunk的大小已经增长到快1M了,
+    // 那就尽早停下来, 也就是说最大的chunk是1M,并且这样的chunk只能有1个
+
+    ./memcached -vvv 可以看到slab的分配情况
+    slab class   1: chunk size        96 perslab   10922
+    slab class   2: chunk size       120 perslab    8738
+    slab class   3: chunk size       152 perslab    6898
+    slab class   4: chunk size       192 perslab    5461
+    slab class   5: chunk size       240 perslab    4369
+    slab class   6: chunk size       304 perslab    3449
+    slab class   7: chunk size       384 perslab    2730
+    slab class   8: chunk size       480 perslab    2184
+    slab class   9: chunk size       600 perslab    1747
+    slab class  10: chunk size       752 perslab    1394
+    slab class  11: chunk size       944 perslab    1110
+    slab class  12: chunk size      1184 perslab     885
+    slab class  13: chunk size      1480 perslab     708
+    slab class  14: chunk size      1856 perslab     564
+    slab class  15: chunk size      2320 perslab     451
+    slab class  16: chunk size      2904 perslab     361
+    slab class  17: chunk size      3632 perslab     288
+    slab class  18: chunk size      4544 perslab     230
+    slab class  19: chunk size      5680 perslab     184
+    slab class  20: chunk size      7104 perslab     147
+    slab class  21: chunk size      8880 perslab     118
+    slab class  22: chunk size     11104 perslab      94
+    slab class  23: chunk size     13880 perslab      75
+    slab class  24: chunk size     17352 perslab      60
+    slab class  25: chunk size     21696 perslab      48
+    slab class  26: chunk size     27120 perslab      38
+    slab class  27: chunk size     33904 perslab      30
+    slab class  28: chunk size     42384 perslab      24
+    slab class  29: chunk size     52984 perslab      19
+    slab class  30: chunk size     66232 perslab      15
+    slab class  31: chunk size     82792 perslab      12
+    slab class  32: chunk size    103496 perslab      10
+    slab class  33: chunk size    129376 perslab       8
+    slab class  34: chunk size    161720 perslab       6
+    slab class  35: chunk size    202152 perslab       5
+    slab class  36: chunk size    252696 perslab       4
+    slab class  37: chunk size    315872 perslab       3
+    slab class  38: chunk size    394840 perslab       2
+    slab class  39: chunk size    493552 perslab       2
+    slab class  40: chunk size    616944 perslab       1
+    slab class  41: chunk size    771184 perslab       1
+    slab class  42: chunk size   1048576 perslab       1
+
+    // 这里仅仅是计算一下每个slab class要怎么用,并没有实际使用内存
+
+    typedef struct {
+        unsigned int size;      // chunk size
+        unsigned int perslab;   // chunk count
+
+        void *slots;
+        unsigned int sl_curr;   // free chunk count
+
+        unsigned int slabs;     // how many slabs were allocated for this class
+
+        void **slab_list;       // slab pointers
+        unsigned int list_size; // slab_list第一次分配时大小是16,后边每次分配时大小翻倍,slabs记录着实际已经用了多少了
+    } slabclass_t;
+
+memcached_thread_init(settings.num_threads = 4);
+    // 创建 4 个thread, 每个thread运行 event_base_loop
+    // 当前的event_base监控notify_receive_id的EV_READ事件,callback函数为 thread_libevent_process
+
+start_assoc_maintenance_thread(); // 还不清楚这个是做什么用的
+
+clock_handler(); // 每秒更新一下current_time
+
+// 接下来 unix domain socket 和 tcp/udp socket 二选一
+// 把bind,listen的socket加到conns,然后监控其EV_READ事件,对应的callback函数为event_handler
+
+uriencode_init(); // 用于做uriencode
+
+event_base_loop(main_base);
+
+
+// 回过头来总结一下:
+//      main_thread创建server_socket,加到conns里,然后通过main_base监控是否有新连接(EV_READ),
+//      有新连接过来时accept,然后dispatch_conn_new(conn_new_cmd)新建一个CQ_ITEM,
+//      找到一个thread,push到这个thread的new_conn_queue
+//      memcached_thread_init()时,给每个thread创建了一个pipe,新建的thread监控pipe的读端,
+//      main_thread把新的conn item push给thread后,通过向pipe的写端写入"c",唤醒thread去处理这个conn
+//      thread被唤醒后,执行thread_libevent_process(),thread_libevent_process()创建一个conn,也加到conns里,
+//      并通过thread的event_base监控其EV_READ,当client写入命令时,conn state切换到conn_waiting,再切换到conn_read,
+//      read数据之后,state切换到conn_parse_cmd,然后处理第一行得到cmd并process_command().
+</code></pre>
+
+<h3>process_command()</h3>
+<pre><code class="language-c">tokenize_command(command, tokens, MAX_TOKENS = 8);
+// get,bget
+process_get_command(c, tokens, ntokens, false);
+// add,set,replace,prepend,append
+process_update_command(c, tokens, ntokens, comm, false);
+    // CMD key flags exptime bytes noreply
+    // cas key falgs exptime bytes cas_unique noreply
+    #define KEY_MAX_LENGTH 250
+    // parse cmd line得到 key, flags, exptime, bytes后,do_item_alloc()
+    do_item_alloc(char *key, size_t nkey, unsigned int flags, rel_time_t exptime, int nbytes)
+    // 一个item的存储结构是这样的: item_header key flags nbytes data [cas]
+    // 计算出当前这个key需要多大的存储空间后,从上边预先分配好的slab class里找一个大小合适的
+        slabs_alloc(ntotal, id, &total_bytes, 0); => do_slabs_alloc()
+            do_slabs_newslab();
+            // 前边一直好奇slabclass[0]为什么一直没提,其实slabclass[0]用于global page pool,
+            // 当真的需要给一个slabclass的slab分配内存时,先从这个global page pool里取,如果有直接用,没有的话再分配
+            // 分3步走: 
+            // 1. grow_slab_list() 扩充当前选中的slabclass的slab_list
+            // 2. get_page_from_global_pool() 尝试从global pool里取一个之前分配好的内存
+            // 3. memory_allocate() 如果上一步没拿到的话,这里分配内存
+            split_slab_page_into_freelist();
+                // 把这块刚分配好的内存按照这个slab的规划串联起来,最后通过slabclass->slots就可以访问到所有chunk了
+            // 最后把刚分配好的slab保存到slab_list里
+        // slabs_alloc()其实就是找到一个合适的chunk,然后标记一下,这个chunk我用了
+    // 拿到一个chunk后,完成chunk header的填充工作,conn_state置为conn_nread.
+    // 接下来就是从client读取数据放到chunk里边了,当数据读取完毕后,complete_nread
+    complete_nread_ascii();
+    // 插入hashtable就完了
+// cas
+process_update_command(c, tokens, ntokens, comm, true);
+// incr
+process_arithmetic_command(c, tokens, ntokens, 1);
+// gets
+process_get_command(c, tokens, ntokens, true);
+// decr
+process_arithmetic_command(c, tokens, ntokens, 0);
+// delete
+process_delete_command(c, tokens, ntokens);
+// touch
+process_touch_command(c, tokens, ntokens);
+// stats
+process_stat(c, tokens, ntokens);
+// flush_all, version, quit, shutdown, slabs reassign, lru_crawler crawl|metadump|tocrawl|sleep|enable
+// watch
+process_watch_command(c, tokens, ntokens);
+// cache_memlimit
+process_memlimit_command(c, tokens, ntokens);
+// verbosity
+process_verbosity_command(c, tokens, ntokens);
+</code></pre>
+
+
+</div>
+<script src="../prism.js"></script>
+</body>
+</html>
