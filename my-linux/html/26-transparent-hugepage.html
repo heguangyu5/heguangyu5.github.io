@@ -27,7 +27,7 @@
     8. 继续执行,再次break到vfs_write.同样查看%rsi的内容可确定执行到正确的位置.再查看page table, entry已经有了.<br>
 </p>
 
-<h3>结论</h3>
+<h3>结论1</h3>
 <pre><code class="language-bash">cat /sys/kernel/mm/transparent_hugepage/enabled
 always [madvise] never</code></pre>
 1. 简单的mmap不会分配大块内存,还是4K,4K的分配的 <br>
@@ -37,6 +37,12 @@ always [madvise] never</code></pre>
 5. 使用posix_memalign拿到一个对齐到1G的地址,再调用madvise,此时kernel依旧分配2M大小的内存,而不会分配1G的. (要想测试这种情况,.bochsrc要调整一下 memory: guest=20480, host=2048, bochs限制host_size最大2048,没有找到在哪里能调整)<br>
 6. mmap后直接调用madvise,不计算对齐后的地址,然后当使用这块内存时,刚开始的前边一小部分是4K,4K分配的,后边对齐到2M后就是2M,2M分配的了.果真是transparent hugepage.<br>
 
+<h3>结论2</h3>
+<pre><code class="language-bash">cat /sys/kernel/mm/transparent_hugepage/enabled
+[always] madvise never</code></pre>
+
+always的情况下,简单的mmap后,如果使用到的内存地址对齐到了2M上,那么kernel就真的分配2M的内存.不需要程序里额外做什么.<br>
+显然如果使用posix_memalign(),那么申请的内存当使用时都是2M,2M分配的.
 
 <br>
 <br>
