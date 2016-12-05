@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="../prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">Redis 3.2.5</h1>
+
+<h3>main()</h3>
+<pre><code class="language-c"> // server.c
+initServerConfig();
+
+initServer();
+
+createPidFile();
+redisSetProcTitle(argv[0]);
+checkTcpBacklogSettings();
+    fopen("/proc/sys/net/core/somaxconn", "r")
+linuxMemoryWarnings();
+    fopen("/proc/sys/vm/overcommit_memory","r");
+    fopen("/sys/kernel/mm/transparent_hugepage/enabled","r");
+loadDataFromDisk();
+
+aeSetBeforeSleepProc(server.el,beforeSleep);
+aeMain(server.el);
+aeDeleteEventLoop(server.el);
+</code></pre>
+
+<h3>initServer()</h3>
+<pre><code class="language-c">signal(SIGHUP, SIG_IGN);
+signal(SIGPIPE, SIG_IGN);
+setupSignalHandlers();
+    SIGTERM,SIGINT -> sigShutdownHandler -> server.shutdown_asap = 1;
+    // 如果连按两次Ctrl+C,不dump数据,直接退出
+
+    server.clients,clients_to_close,slaves,monitors,clients_pending_write ... = listCreate();
+    // adlist.h adlist.c 就是一个普通的双向链表,只不过每个list可自带dup,free,match
+    server.system_memory_size = zmalloc_get_memory_size();
+
+    createSharedObjects();
+    adjustOpenFilesLimit();
+    server.el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR); // epoll_create
+    server.db = zmalloc(sizeof(redisDb) * server.dbnum = 16);
+
+    listenToPort(server.port,server.ipfd,&server.ipfd_count);
+        // socket, bind, listen and set nonblock
+
+    server.db[0...15] => dictCreate();
+
+    server.pubsub_channels = dictCreate();
+    server.pubsub_patterns = listCreate();
+
+    resetServerStats();
+
+    updateCachedTime();
+        server.unixtime = time(NULL);
+        server.mstime   = mstime();
+
+    aeCreateTimeEvent(serverCron);
+    aeCreateFileEvent(acceptTcpHandler); // epoll_ctl(EPOLL_CTL_ADD EPOLLIN)
+
+    replicationScriptCacheInit();
+    scriptingInit(1);
+    slowlogInit();
+    latencyMonitorInit();
+    bioInit(); => pthread_create(bioProcessBackgroundJobs)
+</code></pre>
+
+<h3>aeMain()</h3>
+<pre><code class="language-c">eventLoop->stop = 0;
+while (!eventLoop->stop) {
+    eventLoop->beforesleep(eventLoop);
+    aeProcessEvents(eventLoop, AE_ALL_EVENTS);
+}
+
+aeProcessEvents(); => epoll_wait(); => eventLoop.fired[]
+if (READABLE) rfileProc();
+if (WRITABLE) wfileProc();
+processTimeEvents();
+</code></pre>
+
+<h3>acceptTcpHandler()</h3>
+<pre><code class="language-c">int max = 1000;
+while (max--) {
+    cfd = anetTcpAccept();
+    acceptCommonHandler(cfd);
+        createClient(fd);
+            set nonblock, enableTcpNoDelay, keepalive, aeCreateFileEvent(readQueryFromClient).
+            selectDb(); => 选择server.db[0]
+            listAddNodeTail(server.clients, c);
+        // 如果clients数量超出限制,reject conn.
+        // 如果在protected mode并且连接不是来自本机也没有设password,denied.
+}
+
+readQueryFromClient(); => read() => processInputBuffer();
+// redis限制query buffer最大为1GB
+    processInlineBuffer();
+        // 把收到的第一行split,得到argc, argv
+    processCommand();
+        // 最先检查是不是要quit
+        // redisCommandTable: get,set,setnx,setex,psetex,append,strlen,del,exists...
+        // 检查是否需要密码验证
+        // 如果是write command,检查下可不可以写
+        // 在Pub/Sub context下,只能使用(P)SUBSCRIBE / (P)UNSUBSCRIBE / PING / QUIT
+        // 如果是CLIENT_MULTI, queueMultiCommand();
+        call(client, CMD_CALL_FULL);
+            client->cmd->proc();
+            // SET key value [NX] [XX] [EX &lt;seconds&gt;] [PX &lt;milliseconds&gt;]
+            setCommand(); => setGenericCommand(client, flags, key, value, expire, unit, NULL, NULL);
+                setKey(c->db, key, val);
+                    lookupKeyWrite(db, key) ? dbOverwrite() : dbAdd(); => dictReplace/dictAdd
+                    incrRefCount(val);
+                    removeExpire();
+                    signalModifiedKey();
+                notifyKeyspaceEvent(NOTIFY_STRING,"set",key,c->db->id);
+                    pubsubPublishMessage(chanobj, eventobj);
+</code></pre>
+
+</div>
+<script src="../prism.js"></script>
+</body>
+</html>
