@@ -122,6 +122,66 @@ readQueryFromClient(); => read() => processInputBuffer();
                     pubsubPublishMessage(chanobj, eventobj);
 </code></pre>
 
+<h3>dict</h3>
+<pre><code class="language-c">typedef struct dictEntry {
+    void *key;
+    union {
+        void     *val;
+        uint64_t u64;
+        int64_t  s64;
+        double   d;
+    } v;
+    struct dictEntry *next;
+} dictEntry;
+
+typedef struct dictType {
+    unsigned int (*hashFunction)(const void *key);
+    void *(keyDup)();
+    void *(*valDump)();
+    int (*keyCompare)();
+    void (*keyDestructor)();
+    void (*valDestructor)();
+} dictType;
+
+typedef struct dictht {
+    dictEntry **table;
+    unsigned long size;
+    unsigned long sizemask;
+    unsigned long used;
+} dictht;
+
+typedef struct dict {
+    dictType *type;
+    void *privdata;
+    dictht ht[2];
+    long rehashidx; // 默认为-1,如果正在rehash,则记录着rehash到哪个index了
+    int iterators;
+} dict;
+
+dict *dictCreate(dictType *type, void *privDataPtr); // 仅仅是malloc了dict并初始化, dict->ht[x] = NULL
+int dictAdd(dict *d, void *key, void *val);
+    dictEntry *dictAddRaw(dict *d, void *key);
+        _dictKeyIndex(d, key);
+            _dictExpandIfNeeded(d); => d->ht[0].size == 0 => dictExpand(d, DICT_HT_INITIAL_SIZE = 4)
+                dict->ht[0] = {
+                    .table = calloc(dictEntry *),
+                    size = power of 2,
+                    mask = size - 1,
+                    used = 0
+                }
+            h = dictHashKey(d, key); // 调用dict对应type的hashFunction
+            h & sizemask得到idx,如果idx上不为空,则通过对比key检查是否存在
+        // 找到index后,malloc一个dictEntry,used++,dictSetKey(),返回新malloc的entry
+    // 得到entry后,dictSetVal(), add ok
+dictRehash();
+    // 当dict里元素个数达到一定量时,expand,启动rehash,检查点是在 _dictExpandIfNeeded 里.
+    // expand其实就是新calloc一个dictht.table作为ht[1],然后一点一点地把ht[0]里的dictEntry都移到ht[1]里,
+    // 当rehash全部完成时,ht[0] == ht[1]
+// 问题: 每个dictEntry都是单独malloc的,这会消耗大量内存呀?
+dictReplace();
+    // 先尝试dictAdd(),如果已存在,则dictFind(),然后setVal
+</code></pre>
+
 </div>
 <script src="../prism.js"></script>
 </body>
