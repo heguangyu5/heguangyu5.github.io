@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../../bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="../../prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">/dev/random, /dev/urandom</h1>
+
+<pre><code class="language-c">// man urandom
+// drivers/char/random.c?v=linux-2.6.39
+
+module_init(rand_initialize);
+rand_initialize()
+    init_std_data(&input_pool);
+    init_std_data(&blocking_pool);
+    init_std_data(&nonblocking_pool);
+
+struct poolinfo {
+    int poolwords;
+    int tap1, tap2, tap3, tap4, tap5;
+} poolinfo_table[] = {
+    {128, 103, 76, 51, 25, 1},
+    {32, 26, 20, 14, 7, 1}
+};
+struct entropy_store {
+    struct poolinfo *poolinfo;
+    __u32 *pool;
+    const char *name;
+    struct entropy_store *pull;
+    int limit;
+
+    spinlock_t lock;
+    unsigned add_ptr;
+    int entropy_count;
+    int input_rotate;
+    ___u8 last_data[EXTRACT_SIZE = 10];
+};
+__u32 input_pool_data[INPUT_POOL_WORDS = 128];
+__u32 blocking_pool_data[OUTPUT_POOL_WORDS = 32];
+__u32 nonblocking_pool_data[OUTPUT_POOL_WORDS = 32];
+
+struct entropy_store input_pool = {
+    .poolinfo = &poolinfo_table[0],
+    .name = "input",
+    limit = 1,
+    .pool = input_pool_data
+}
+blocking_pool = {
+    .poolinfo = &poolinfo_table[1],
+    .pull = input_pool,
+    .limit = 1,
+    .pool = blocking_pool_data
+}
+nonblocking_pool = {
+    .poolinfo = &poolinfo_table[1],
+    .pull = input_pool,
+    .pool = nonblocking_pool_data
+}
+
+init_std_data(struct entropy_store *r)
+    r->entropy_count = 0;
+    now = ktime_get_real();
+    mix_pool_bytes(r, &now);
+    mix_pool_bytes(r, utsname()); // utsname @see man 2 uname
+
+mix_pool_bytes => mix_pool_bytes_extract(r, data, datalen)
+    // mix_pool_bytes做的事就是把参数提供的数据做一系列的转换计算然后填充到r->pool里
+    // 也就是input_pool_data,blocking_pool_data,nonblocking_pool_data里
+
+// OK, 大概明白了,随机数分别存储在三个pool_data数组里,entropy_count记录着数组里可用的随机数有多少个.
+// module_init()时,把entropy_count设为0,并使用当前时间和utsname初始化这三个pool_data
+// 然后当kernel在处理input event,irq event,disk event时,会调用random module提供的add_*randomness方法继续向
+// pool_data里添加数据,并更新entropy_count
+
+get_random_bytes(void *buf, int nbytes)
+    extract_entropy(&nonblocking_pool, buf, nbytes, min = 0, reserved = 0);
+random_read()
+    while (nbytes) {
+        extract_entropy_user(&blocking_pool, buf, n);
+    }
+urandom_read()
+    extract_entropy_user(&nonblocking_pool, buf, n);
+// 这三个方法的根本区别在pool.limit,blocking_pool.limit = 1, nonblocking_pool.limit = 0
+// 在调用extract_buf()前,会调用account()根据pool.entropy_count修正要从pool里取多少随机数出来
+// limit=1时,会修正,limit=0时,不修正
+// 所以读取nonblocking_pool,指定了读多少字节,就返回多少字节,但是读blocking_pool,可能返回的比期望的少
+// 由于random_read()将extract方法包在了while里,所以就会有man page里说的 
+// "When  the  entropy  pool  is empty, reads from /dev/random will block until additional environmental noise is gathered."
+
+
+// 关于 /proc/sys/kernel/random/{boot_id, uuid}
+proc_do_uuid()
+generate_random_uuid();
+// boot_id, 它和变量sysctl_bootid关联,第一次read boot_id时,sysctl_bootid是空的,
+//          此时调用generate_random_uuid()生成一个uuid保存到sysctl_bootid里,后边再read时直接返回
+// uuid, 它没有和任何变量关联,每次read都要调用generate_random_uuid()生成一个新的
+// generate_random_uuid() 调用的是 get_random_bytes(), get_random_bytes()使用的是nonblocking_pool,所以不会有block住的情况
+</code></pre>
+
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+</div>
+<script src="../../prism.js"></script>
+</body>
+</html>
