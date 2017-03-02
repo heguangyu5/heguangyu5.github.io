@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="../prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">Protocol</h1>
+
+<pre>
+// header
+所有的Packet都有一个4字节的header. 
+前边3字节是packet body的长度, 后边1个字节是packet的编号. 
+编号在每开始一个新命令时都会重置.
+
+// first packet
+当client连接到mysql时,mysql首先回一个greeting packet. 
+packet body里包含了
+    server version,
+    thread id,              // connection id
+    server capabilities,
+    server charset
+等信息.
+
+// login packet
+packet body里包含了
+client capabilities
+max packet
+client charset
+username
+password
+等信息.
+
+// Response
+response packet body的第一个字节表明了response的类型.
+0xff (255): ERROR
+0: OK
+
+// Response Error body
+2字节的Error Code,
+#号跟着5字节的SQL STATE Code,比如用户名密码不对时返回 #28000, Table不存在时返回 #42S02
+接下来是具体的出错信息.
+// 出错示例:
+ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: YES)
+ERROR 1146 (42S02): Table 'test.aaa' doesn't exist
+
+// Response OK body
+affected rows:
+        如果影响行数小于251,占一个字节,就是影响的行数.
+        如果小于65536,占3个字节,第一个字节是0xfc(252),后边跟着两个字节的影响行数
+        如果小于16777216,占4个字节,第一个字节是0xfd(253),后边跟着三个字节的影响行数
+        如果影响行数大于等于16777216,第一个字节是0xfe(254),后边跟着8字节的影响行数
+last_insert_id: 格式同affected rows
+server status: 2个字节
+warnings: 2个字节
+
+// Query packet
+packet body很简单,1个字节的command code,后边跟着command的参数,如果有的话.
+
+// Result Set packets
+第一个packet的body包含了返回结果里列的数目.
+比如对select id,title,body from post这样一个query的返回结果,第一个packet body的内容是3.
+
+接下来有多个列,就有多少个packet,这些packet叫 field description packets. 
+packet body里包含了
+    数据库名,
+    表名/原始表名,
+    列名/原始列名,
+    该列的charset,
+    列的长度,
+    列的类型,
+    列的flags(not null, primary key, zero fill等),
+等信息.
+
+field description packets完了之后跟一个EOF packet表明没有更多列了.
+EOF packet的第一个字节是0xfe(254). 后边跟着2字节的warning,2字节的server status.
+
+接下来就是一行一行的数据了,每一行数据占一个packet. packet body里直接就是数据本身.
+比如select id, title, body from post的返回结果.
+id real length      + id +
+title real length   + title +
+body real length    + body
+这里需要注意的是,id列虽然类型是int,返回结果里还是将其转成了字符串返回了.
+
+最后再跟一个EOF packet表示结束.
+
+这里有个问题, EOF packet的第一个字节是0xfe, 
+result set packet如果第一列的长度超过16777216的话,也是0xfe,怎么区分呢?
+通过packet length区分. EOF packet限制其长度不能超过7个字节.而result set packet的长度在上述情况下远大于7个字节.
+</pre>
+
+额外收获:<br>
+1. 在login request里就可以指定数据库和charset.<br>
+2. 服务器返回数据时会根据client的charset做转换.但不见得能转换成功.比如server是utf8的,client是gbk的,返回数据时列的charset就unknown了.如果client是latin1(默认charset),服务器返回时列的charset也是latin1,但中文直接就是?了.<br>
+2. last_insert_id()其实在insert执行成功时返回的packet里就有,所以pdo->lastInsertId()根本就没有再次向mysql发请求.<br>
+3. update时的affected rows默认返回的是真的update了几行,也可以设置返回找到了几行. 实际是不管有没有设置,返回的packet里有message说明matched多少,changed的多少,只不过是字符串形式的,不太好提取.
+
+
+</div>
+<script src="../prism.js"></script>
+</body>
+</html>
