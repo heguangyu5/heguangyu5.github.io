@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="../prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">dispatch_command</h1>
+
+<pre><code class="language-c">dispatch_command(
+    enum enum_server_command command,
+    THD *thd,
+    char *packet,
+    uint packet_length
+) {
+    thd->command = command;
+    thd->set_query_id(next_query_id());
+    inc_thread_running(); // thread_running++
+
+    switch (command) {
+        case COM_INIT_DB:               mysql_change_db(dbname);    break;
+        case COM_REGISTER_SLAVE:        register_slave();           break;
+        case COM_CHANGE_USER:           thd->change_user();...      break;
+        case COM_STMT_EXECUTE:          mysqld_stmt_execute();      break;
+        case COM_STMT_FETCH:            mysqld_stmt_fetch();        break;
+        case COM_STMT_SEND_LONG_DATA:   mysql_stmt_get_longdata();  break;
+        case COM_STMT_PREPARE:          mysqld_stmt_prepare();      break;
+        case COM_STMT_CLOSE:            mysqld_stmt_close();        break;
+        case COM_STMT_RESET:            mysqld_stmt_reset();        break;
+        case COM_QUERY:
+            break;
+        case COM_FIELD_LIST:
+            break;
+        case COM_QUIT:
+            thd->stmt_da->disable_status();
+            error = TRUE;
+            break;
+        case COM_BINLOG_DUMP:
+            break;
+        // COM_REFRESH, COM_SHUTDIWN, COM_STATISTICS, COM_PING, COM_PROCESS_INFO
+        // COM_PROCESS_KILL, COM_SET_OPTION, COM_DEBUG
+    }
+
+    thd->update_server_status();
+    thd->protocol->end_statement();
+    query_cache_end_of_result(thd); // Query_cache::end_of_result(THD *thd)
+    log_slow_statement(thd);
+
+    thd->reset_query();
+    thd->command = COM_SLEEP;
+    dec_thread_running(); // thread_running--
+}
+</code></pre>
+
+<h3>Protocol::end_statement()</h3>
+<pre><code class="language-c">switch (thd->stmt_da->status()) {
+case DA_ERROR:
+    send_error(thd->stmt_da->sql_errno(), stmt_da->message(), stmt_da->get_sqlstate());
+    break;
+case DA_EOF:
+    send_eof(thd->server_status, stmt_da->statement_warn_count);
+    break;
+case DA_OK:
+    send_ok(thd->server_status,
+            stmt_da->statement_warn_count,
+            stmt_da->affected_rows(),
+            stmt_da->last_insert_id(),
+            stmt_da->message()
+           );
+    break;
+}
+</code></pre>
+
+
+<h3>mysql_change_db(dbname)</h3>
+<pre><code class="language-c">check_db_name();
+check_db_dir_existence(); // 每个数据库在/var/lib/mysql里有一个单独的目录,
+                          // 每个表都有一个对应的table_name.frm,
+                          // 还有一个文本文件db.opt记录着这个数据库的默认字符集
+mysql_change_db_impl(dbname, db_access, db_default_charset);
+    thd->reset_db(dbname); // thd->db = dbname;
+    thd->security_ctx->db_access = db_access;
+    thd->db_charset = db_default_charset;
+    thd->variables.collation_database = db_default_charset;
+</code></pre>
+
+<h3>COM_QUERY</h3>
+<pre><code class="language-c">alloc_query();
+    query = sql '\0' dbname_length dbname flags
+    thd->set_query(query);
+parser_state.init(thd, thd->query(), thd->query_length());
+mysql_parse(thd, thd->query(), thd->query_length(), &parser_state);
+    query_cache_send_result_to_client(thd, query, query_length);
+
+while (parser_state.m_lip.found_semicolon != NULL) {
+    // multiple queries
+    mysql_parse(next_query);
+}
+
+mysql_parse(query) => MYSQLparse
+</code></pre>
+
+</div>
+<script src="../prism.js"></script>
+</body>
+</html>
