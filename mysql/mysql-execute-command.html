@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="../prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">mysql_execute_command(THD *thd)</h1>
+
+<pre><code class="language-c">LEX *lex = thd->lex;
+switch (lex->sql_command) {
+    case SQLCOM_CREATE_DB:      mysql_create_db();
+    case SQLCOM_CREATE_TABLE:   mysql_create_table();
+    case SQLCOM_DROP_DB:        mysql_rm_db();
+}
+</code></pre>
+
+<h3>mysql_create_db(THD *thd, char *dbname, create_info, silent)</h3>
+<pre><code class="language-c">lock_schema_name(thd, dbname);
+path = build_table_filename(path, path_length, dbname, tablename="", table_extension="", flags = 0);
+// mysql_data_dir/db/
+my_mkdir(path, 0777, ...);
+// mysql_data_dir/db/db.opt
+write_db_opt(thd, path, create_info);
+    mysql_file_create(path);
+    mysql_file_write("default-character-set=xxx\ndefault-collation=xxx\n");
+if (!silent) {
+    my_ok();
+}
+</code></pre>
+
+<h3>mysql_create_table(THD *thd, TABLE_LIST *create_table, create_info, alter_info)</h3>
+<pre><code class="language-c">open_and_lock_tables();
+mysql_create_table_no_lock(thd, create_table->db, create_table->table_name, ...);
+    check_engine(); // Check if the table can be created in the specified storage engine.
+        ha_checktype();
+            handlerton *hton = ha_resolve_by_legacy_type(thd, database_type);
+            if (ha_storage_engine_is_enabled(hton)) {
+                return hton;
+            }
+            return ha_default_handlerton(thd);
+        // Check, if the given table name is system table, and if the storage engine does supports it.
+        ha_check_if_supported_system_table(*engine, db_name, table_name);
+    set_table_default_charset();
+
+    handler *file = get_new_handler(handlerton* create_info->db_type);
+        if (db_type && db_type->state == SHOW_OPTION_YES && db_type->create) {
+            file = db_type->create(db_type, ...);
+            file->init();
+            return file;
+        }
+        return get_new_handler(ha_default_handlerton(current_thd));
+
+    mysql_prepare_create_table(
+        THD *thd,
+        HA_CREATE_INFO *create_info,    // create information, like MAX_ROWS
+        Alter_info *alter_info,         // list of columns and indexes to create
+        bool tmp_table,
+        uint *db_options,
+        handler *file,
+        KEY **key_info_buffer,
+        uint *key_count,
+        int select_field_count
+    );
+
+    ha_table_exists_in_engine(thd, db, table_name);
+
+    rea_create_table( // create frm file
+        THD *thd,
+        const char *path,
+        const char *db,
+        const char *table_name,
+        HA_CREATE_INFO *create_info,
+        List&lt;Create_field&gt; &create_fields,
+        uint keys,
+        KEY *key_info,
+        handler *file
+    );
+        mysql_create_frm();
+        if (!create_info->frm_only && file->ha_create_handler_files(path, create_info)) {
+            ha_create_table();
+        }
+        /** .frm 文件格式 @see create_frm
+        offset  value
+        0       254
+        1       1
+        2       FRM_VER + 3 + test(create_info->varchar) = 9 + (0|1)
+                FRM_VER定义在include/mysql_version.h.in里,值为DOT_FRM_VERSION,
+                DOT_FRM_VERSION定义在cmake/mysql_version.cmake里,值为6
+                如果表里包含了varchar列,test(create_info->varchar)返回1
+        3       storage engine, MYISAM = 9, InnoDB = 12(0xc)
+        4       1
+        5       0
+        6-7     0x1000 = IO_SIZE
+        8-9     0
+        10-14   next_io_size(IO_SIZE + key_length + reclength + extra_size)
+        14-15   tmp_key_length = key_length, 如果没有定义索引就是0x10=16
+        16-17   reclength
+        18-21   create_info->max_rows
+        22-25   create_info->min_rows
+        26      set in mysql_create_frm()
+        27      2
+        28-29   set to key_info_length in mysql_create_frm()
+        30-31   create_info->table_options
+        32      0
+        33      5   // 5.0 frm file
+        34-37   create_info->avg_row_length
+        38      csid = create_info->default_table_charset->number; (uchar) csid
+        39      0
+        40      create_info->row_type
+        41      (uchar)(csid >> 8)
+        42-46   0
+        47-50   key_length
+        51-54   MYSQL_VERSION_ID
+        55-58   create_info->extra_size
+        59-60   extra_rec_buf_length
+        61      default_part_db_type
+        62-63   create_info->key_block_size
+        */
+
+</code></pre>
+
+</div>
+<script src="../prism.js"></script>
+</body>
+</html>

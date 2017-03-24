@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="../prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">MyISAM</h1>
+
+<h3>.MYD(MySQL Data)</h3>
+<pre> // @see https://dev.mysql.com/doc/internals/en/myisam-introduction.html
+有三种格式: fixed, dynamic, packed
+
+fixed format
+
+文件里保存着一条条记录(record),每条记录的开头是一个record header.
+record header的第一个bit标记着这条记录是否已删除.
+从第2个bit开始,记录着表里边可为null的字段在这条记录里是否真的为null.
+再后边的bit是padding bit,没有什么意义.
+如果没有null字段,那从第2个bit开始就已经是padding bit了.
+再后边紧跟着的就是这条记录的数据了.
+
+实际看个例子:
+
+mysql> desc table_1;
++----------+---------------------+------+-----+---------+-------+
+| Field    | Type                | Null | Key | Default | Extra |
++----------+---------------------+------+-----+---------+-------+
+| column_1 | int(10) unsigned    | NO   | PRI | NULL    |       |
+| column_2 | char(2)             | NO   |     | NULL    |       |
+| column_3 | tinyint(3) unsigned | NO   |     | NULL    |       |
++----------+---------------------+------+-----+---------+-------+
+3 rows in set (0.01 sec)
+
+mysql> select * from table_1;
++----------+----------+----------+
+| column_1 | column_2 | column_3 |
++----------+----------+----------+
+|        1 | AB       |        1 |
+|        2 | CD       |        2 |
+|        3 | EF       |        3 |
+|        4 | GH       |        4 |
++----------+----------+----------+
+4 rows in set (0.00 sec)
+
+# hexdump -C table_1.MYD
+00000000  ff 01 00 00 00 41 42 20  20 20 20 01 ff 02 00 00  |.....AB    .....|
+00000010  00 43 44 20 20 20 20 02  ff 03 00 00 00 45 46 20  |.CD    ......EF |
+00000020  20 20 20 03 ff 04 00 00  00 47 48 20 20 20 20 04  |   ......GH    .|
+00000030
+
+1: ff    01 00 00 00     41 42 20 20 20 20       01
+2: ff    02 00 00 00     43 44 20 20 20 20       02
+3: ff    03 00 00 00     45 46 20 20 20 20       03
+4: ff    04 00 00 00     47 48 20 20 20 20       04
+
+有一点和想像不的一样,char(2)字段看起来被pad了4个空格.
+
+我们删掉第2条和第3条记录:
+
+mysql> select * from table_1;
++----------+----------+----------+
+| column_1 | column_2 | column_3 |
++----------+----------+----------+
+|        1 | AB       |        1 |
+|        4 | GH       |        4 |
++----------+----------+----------+
+2 rows in set (0.00 sec)
+
+# hexdump -C table_1.MYD
+00000000  ff 01 00 00 00 41 42 20  20 20 20 01 00 ff ff ff  |.....AB    .....|
+00000010  ff ff ff 20 20 20 20 02  00 00 00 00 00 00 01 20  |...    ........ |
+00000020  20 20 20 03 ff 04 00 00  00 47 48 20 20 20 20 04  |   ......GH    .|
+00000030
+
+1: ff    01 00 00 00     41 42 20 20 20 20       01
+2: 00    ff ff ff ff     ff ff 20 20 20 20       02
+3: 00    00 00 00 00     00 01 20 20 20 20       03
+4: ff    04 00 00 00     47 48 20 20 20 20       04
+
+这里和想像的也不一想,删除一条记录不仅仅是把第一个bit设为0,而是把整个header都设为0了,column_1,column_2的值像是随机的.
+
+关于char(2)被pad了4个空格的情况,我们再建个表看看.
+
+mysql> desc table_2;
++----------+---------------------+------+-----+---------+-------+
+| Field    | Type                | Null | Key | Default | Extra |
++----------+---------------------+------+-----+---------+-------+
+| column_1 | int(10) unsigned    | NO   | PRI | NULL    |       |
+| column_2 | char(10)            | NO   |     | NULL    |       |
+| column_3 | tinyint(3) unsigned | NO   |     | NULL    |       |
++----------+---------------------+------+-----+---------+-------+
+3 rows in set (0.01 sec)
+
+mysql> select * from table_2;
++----------+------------+----------+
+| column_1 | column_2   | column_3 |
++----------+------------+----------+
+|        1 | abcdeABCDE |        1 |
+|        2 | 0123456789 |        2 |
+|        3 | fghijFGHIJ |        3 |
+|        4 | klmnoKLMNO |        4 |
++----------+------------+----------+
+4 rows in set (0.00 sec)
+
+# hexdump -C table_2.MYD
+00000000  ff 01 00 00 00 61 62 63  64 65 41 42 43 44 45 20  |.....abcdeABCDE |
+00000010  20 20 20 20 20 20 20 20  20 20 20 20 20 20 20 20  |                |
+00000020  20 20 20 01 ff 02 00 00  00 30 31 32 33 34 35 36  |   ......0123456|
+00000030  37 38 39 20 20 20 20 20  20 20 20 20 20 20 20 20  |789             |
+00000040  20 20 20 20 20 20 20 02  ff 03 00 00 00 66 67 68  |       ......fgh|
+00000050  69 6a 46 47 48 49 4a 20  20 20 20 20 20 20 20 20  |ijFGHIJ         |
+00000060  20 20 20 20 20 20 20 20  20 20 20 03 ff 04 00 00  |           .....|
+00000070  00 6b 6c 6d 6e 6f 4b 4c  4d 4e 4f 20 20 20 20 20  |.klmnoKLMNO     |
+00000080  20 20 20 20 20 20 20 20  20 20 20 20 20 20 20 04  |               .|
+00000090
+
+1: ff       01 00 00 00     61 62 63 64 65 41 42 43 44 45 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20       01
+2: ff       02 00 00 00     30 31 32 33 34 35 36 37 38 39 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20       02
+3: ff       03 00 00 00     66 67 68 69 6a 46 47 48 49 4a 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20       03
+4: ff       04 00 00 00     6b 6c 6d 6e 6f 4b 4c 4d 4e 4f 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20       04
+
+好吧,pad了更多的空格.
+
+一样删掉第2条和第3条记录.
+
+mysql> select * from table_2;
++----------+------------+----------+
+| column_1 | column_2   | column_3 |
++----------+------------+----------+
+|        1 | abcdeABCDE |        1 |
+|        4 | klmnoKLMNO |        4 |
++----------+------------+----------+
+2 rows in set (0.00 sec)
+
+# hexdump -C table_2.MYD
+00000000  ff 01 00 00 00 61 62 63  64 65 41 42 43 44 45 20  |.....abcdeABCDE |
+00000010  20 20 20 20 20 20 20 20  20 20 20 20 20 20 20 20  |                |
+00000020  20 20 20 01 00 ff ff ff  ff ff ff 32 33 34 35 36  |   ........23456|
+00000030  37 38 39 20 20 20 20 20  20 20 20 20 20 20 20 20  |789             |
+00000040  20 20 20 20 20 20 20 02  00 00 00 00 00 00 01 68  |       ........h|
+00000050  69 6a 46 47 48 49 4a 20  20 20 20 20 20 20 20 20  |ijFGHIJ         |
+00000060  20 20 20 20 20 20 20 20  20 20 20 03 ff 04 00 00  |           .....|
+00000070  00 6b 6c 6d 6e 6f 4b 4c  4d 4e 4f 20 20 20 20 20  |.klmnoKLMNO     |
+00000080  20 20 20 20 20 20 20 20  20 20 20 20 20 20 20 04  |               .|
+00000090
+
+1: ff       01 00 00 00     61 62 63 64 65 41 42 43 44 45 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20       01
+2: 00       ff ff ff ff     ff ff 32 33 34 35 36 37 38 39 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20       02
+3: 00       00 00 00 00     00 01 68 69 6a 46 47 48 49 4a 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20       03
+4: ff       04 00 00 00     6b 6c 6d 6e 6f 4b 4c 4d 4e 4f 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20 20       04
+
+column_2, column_3的值开头看起来是随机的. 这里说明一个问题,如果对MyISAM的表做了删除操作,想做数据恢复的话,基本上是不可能的.
+
+接下来看看有null字段的情况.
+
+mysql> desc table_3;
++----------+---------------------+------+-----+-------------------+-------+
+| Field    | Type                | Null | Key | Default           | Extra |
++----------+---------------------+------+-----+-------------------+-------+
+| column_1 | int(10) unsigned    | NO   | PRI | NULL              |       |
+| column_2 | char(2)             | YES  |     | NULL              |       |
+| column_3 | tinyint(3) unsigned | YES  |     | NULL              |       |
+| column_4 | timestamp           | NO   |     | CURRENT_TIMESTAMP |       |
++----------+---------------------+------+-----+-------------------+-------+
+4 rows in set (0.00 sec)
+
+mysql> select * from table_3;
++----------+----------+----------+---------------------+
+| column_1 | column_2 | column_3 | column_4            |
++----------+----------+----------+---------------------+
+|        1 | AB       |        1 | 2017-03-22 11:11:33 |
+|        2 | NULL     |        2 | 2017-03-22 11:11:33 |
+|        3 | CD       |     NULL | 2017-03-22 11:11:52 |
+|        4 | NULL     |     NULL | 2017-03-22 11:11:52 |
+|        5 | EF       |        5 | 2017-03-22 11:12:22 |
++----------+----------+----------+---------------------+
+5 rows in set (0.00 sec)
+
+# hexdump -C table_3.MYD
+00000000  f9 01 00 00 00 41 42 20  20 20 20 01 65 eb d1 58  |.....AB    .e..X|
+00000010  fb 02 00 00 00 20 20 20  20 20 20 02 65 eb d1 58  |.....      .e..X|
+00000020  fd 03 00 00 00 43 44 20  20 20 20 00 78 eb d1 58  |.....CD    .x..X|
+00000030  ff 04 00 00 00 20 20 20  20 20 20 00 78 eb d1 58  |.....      .x..X|
+00000040  f9 05 00 00 00 45 46 20  20 20 20 05 96 eb d1 58  |.....EF    ....X|
+00000050
+
+1: f9       01 00 00 00     41 42 20 20 20 20       01      65 eb d1 58
+2: fb       02 00 00 00     20 20 20 20 20 20       02      65 eb d1 58
+3: fd       03 00 00 00     43 44 20 20 20 20       00      78 eb d1 58
+4: ff       04 00 00 00     20 20 20 20 20 20       00      78 eb d1 58
+5: f9       05 00 00 00     45 46 20 20 20 20       05      96 eb d1 58
+
+第1条记录和第5条记录是都有值的,record header = 0xf9 = 11111001b.
+特别需要注意的是,前边说的第一个bit是删除标记,第2个bit开始是可为null的字段是否真的为null.这里的bit是从低位开始数的.
+对于第1条和第5条记录,最低位的bit 1111 100**1**表示这是一条有效的记录.接着的 1111 1**00**1 两个0表示column_2和column_3这两个可为null的字段不为null.
+再分析下第2,3,4条数据:
+2. 0xfb = 11111011b = 1111 1 01 1 (column_2不null,column_3不为null)
+3. 0xfd = 11111101b = 1111 1 10 1 (column_2不为null, column_3为null)
+4. 0xff = 11111111b = 1111 1 11 1 (column_2为null, column_3为null)
+
+
+关于上边说char字段被pad了空格的问题,猜测可能是char字段的字符集是utf8-generic-ci导致的.
+大多数utf8字符都在3个字节内,所以char字段就按3个字节计算的.看上边char(2)加上空格是6个字节,char(10)加上空格是30个字节.
+我们将char字段的字符集修改成latin1_swedish_ci试试看.
+
+mysql> select * from table_4;
++----------+----------+----------+
+| column_1 | column_2 | column_3 |
++----------+----------+----------+
+|        1 | AB       |        1 |
+|        2 | CD       |        2 |
++----------+----------+----------+
+2 rows in set (0.00 sec)
+
+# hexdump -C table_4.MYD
+00000000  ff 01 00 00 00 41 42 01  ff 02 00 00 00 43 44 02  |.....AB......CD.|
+00000010
+
+果然是这样.
+</pre>
+
+<h3>.MYI(MySQL Index)</h3>
+<pre><code class="language-c">// @see https://dev.mysql.com/doc/internals/en/the-myi-file.html
+// The .MYI file has two parts: the header information and the key values.
+
+// .MYI Header
+// 包括4部分: state, base, keydef, recinfo
+
+// state部分
+typedef struct st_mi_state_info
+{
+    struct {
+        uchar file_version[4];      // FE FE 07 01
+        uchar options[2];           // 00 02
+        uchar header_length[2];     // 01 a2 = 0x01a2 = 418 bytes
+        uchar state_info_length[2]; // 00 b0 = 0x00b0 = 176 bytes = MI_STATE_INFO_SIZE = 24+14*8+7*4+2*2+8
+        uchar base_info_length[2];  // 00 64 = 0x0064 = 100 bytes = MI_BASE_INFO_SIZE = 5*8 + 8*4 + 4 + 4*2 + 16
+        uchar base_pos[2];          // 00 d4 = 0x00d4 = 212 bytes base section start pos
+        uchar key_parts[2];         // 00 03
+        uchar unique_key_parts[2];  // 00 00
+        uchar keys;                 // 02 number of keys I1和I2
+        uchar uniques;              // 00 number of hash unique keys used internally in temporary tables 源码里的注释不对
+        uchar language;             // 08 latin1_swedish_ci @see /strings/ctype-latin1.c?v=mysql-5.5.53#0420
+        uchar max_block_size_index; // 01
+        uchar fulltext_keys;        // 00
+        uchar not_used;             // to align to 8-byte boundary
+    } header;
+    uchar open_count[2];            // 00 01
+    uchar changed;                  // 39 set if table updated; reset if shutdown.
+                                    // so one can examin this to see if there was an update without proper shutdown
+    uchar sortkey;                  // FF sorted by this key (not used)
+    uint64_t state->records;        // 02 number of actual, un-deleted records
+    uint64_t state->del;            // 01 number of deleted records
+    uint64_t split;                 // 03 chunks
+    uint64_t dellink;               // 07 link to next removed block.
+                                    // 初始值=HA_OFFSET_ERROR=0xFFFF FFFF FFFF FFFF. 
+                                    // 07指向了T.MYD的第二条记录的开始位置
+    uint64_t state->key_file_length;    // 0x0c00 = 3072 T.MYI文件的大小
+    uint64_t state->data_file_length;   // 0x15 = 21 T.MYD文件的大小
+    uint64_t state->empty;              // 07 T.MYD的第二条记录的开始位置
+    uint64_t state->key_empty;          // 0
+    uint64_t auto_increment;            // 0
+    uint64_t state->checksum;           // 0
+    uint32_t process;                   // 0x0524 process that updated table last mysqld进程的pid
+    uint32_t unique;                    // 0x21 Unique number for this process???
+    uint32_t status;                    // 0
+    uint32_t update_count;              // 4 Updated for each write lock
+                                        // there were 3 inserts + 1 delete, total 4 operations
+    uint64_t key_root;                  // 0x0400 Start of key trees.
+                                        // offset in file where I1 keys start, can be = HA_OFFSET_ERROR
+                                        // 0x0800 key_root occurs twice because there are two keys
+    uint64_t key_del;                   // 0xFFFF FFFF FFFF FFFF delete links for keys
+    uint32_t sec_index_changed;         // 0???
+    uint32_t sec_index_used;            // 0???
+    uint32_t version;                   // 0x58d202ce timestamp of create
+    uint64_t key_map;                   // 03 Which keys are in use
+    uint64_t create_time;               // 0x58d202ce time when file created
+    uint64_t recover_time;              // 0 time of last recover
+    uint64_t check_time;                // 0x58d202ce time of last check
+    uint64_t rec_per_key_rows;          // 0
+    uint32_t rec_per_key_parts;         // 0,0,0 key_parts=3, so rec_per_key_parts occurs 3 times.
+}
+// base部分
+typedef struct st_mi_base_info
+{
+    uint64_t keystart;              // 0x400 keys start at offset 0x400
+    uint64_t max_data_file_length;  // 0
+    uint64_t max_key_file_length;   // 0
+    uint64_t records;               // 0
+    uint64_t reloc;                 // 0
+    uint32_t mean_row_length;       // 0
+    uint32_t reclength;             // 07 record length = length(s1) + length (s2) + length(s3)
+    uint32_t pack_reclength;        // 07
+    uint32_t min_pack_length;       // 07
+    uint32_t max_pack_length;       // 07
+    uint32_t min_block_length;      // 0x14 = 20
+    uint32_t fields;                // 04 S1,S2,S3 + 1 extra
+    uint32_t pack_fields;           // 0
+    uint8_t rec_reflength;          // 06
+    uint8_t key_reflength;          // 06
+    uint8_t keys;                   // 02 两个索引 I1,I2
+    uint8_t auto_key;               // 0
+    uint16_t pack_bits;             // 0
+    uint16_t blobs;                 // 0
+    uint16_t max_key_block_length;  // 0x400 length of block = 0x400
+    uint16_t max_key_length;        // 0x18
+    uint16_t extra_alloc_bytes;     // 0
+    uint8_t extra_alloc_procent;    // 0
+    uint8_t raid_type;              // 0
+    uint16_t raid_chunks;           // 0
+    uint32_t raid_chunksize;        // 0
+    uint8_t pad[6];
+}
+// keydef部分
+// Index I1
+typedef struct st_mi_keydef
+{
+    uint8_t keysegs;        // 1 INDEX(S1)
+    uint8_t key_alg;        // 1 algorithm, Rtree = 2, or Btree = 1, HASH = 3, FULLTEXT = 4
+                            //   @see source/include/my_base.h?v=mysql-5.5.53#0091
+    uint16_t flag;          // 00 49
+    uint16_t block_length;  // 0x400
+    uint16_t keylength;     // 08
+    uint16_t minlength;     // 08
+    uint16_t maxlength;     // 08
+    // keyseg S1
+    uint8_t keyseg->type;       // 01 HA_KEYTYPE_TEXT=1,HA_KEYTYPE_BINARY=2
+                                //    @see source/include/my_base.h?v=mysql-5.5.53#0213
+    uint8_t keyseg->language;   // 08 latin1_swedish_ci
+    uint8_t keyseg->null_bit;   // 02
+    uint8_t keyseg->bit_start;  // 0
+    uint8_t keyseg->bit_end;    // 0
+    uint8_t pad;
+    uint16_t keyseg->flag;      // 00 10
+    uint16_t keyseg->length;    // 00 01  length(S1) = 1
+    uint32_t keyseg->start;     // 01 offset in the row
+    uint32_t keyseg->null_pos;  // 0
+}
+// Index I2
+typedef struct st_mi_keydef
+{
+    uint8_t keysegs;        // 2 INDEX(S2,S3)
+    uint8_t key_alg;        // 1 algorithm, Rtree = 2, or Btree = 1, HASH = 3, FULLTEXT = 4
+                            //   @see source/include/my_base.h?v=mysql-5.5.53#0091
+    uint16_t flag;          // 00 48
+    uint16_t block_length;  // 0x400
+    uint16_t keylength;     // 0d
+    uint16_t minlength;     // 0d
+    uint16_t maxlength;     // 0d
+    // keyseg S2
+    uint8_t keyseg->type;       // 01 HA_KEYTYPE_TEXT=1,HA_KEYTYPE_BINARY=2
+                                //    @see source/include/my_base.h?v=mysql-5.5.53#0213
+    uint8_t keyseg->language;   // 08 latin1_swedish_ci
+    uint8_t keyseg->null_bit;   // 04
+    uint8_t keyseg->bit_start;  // 0
+    uint8_t keyseg->bit_end;    // 0
+    uint8_t pad;
+    uint16_t keyseg->flag;      // 00 10
+    uint16_t keyseg->length;    // 00 02  length(S2) = 2
+    uint32_t keyseg->start;     // 02 offset in the row
+    uint32_t keyseg->null_pos;  // 0
+    // keyseg S3
+    uint8_t keyseg->type;       // 01 HA_KEYTYPE_TEXT=1,HA_KEYTYPE_BINARY=2
+                                //    @see source/include/my_base.h?v=mysql-5.5.53#0213
+    uint8_t keyseg->language;   // 08 latin1_swedish_ci
+    uint8_t keyseg->null_bit;   // 08
+    uint8_t keyseg->bit_start;  // 0
+    uint8_t keyseg->bit_end;    // 0
+    uint8_t pad;
+    uint16_t keyseg->flag;      // 00 10
+    uint16_t keyseg->length;    // 00 03  length(S3) = 3
+    uint32_t keyseg->start;     // 04 offset in the row
+    uint32_t keyseg->null_pos;  // 0
+}
+// recinfo部分
+typedef struct st_columndef
+{
+    uint16_t type;      // 0        extra
+    uint16_t length;    // 01
+    uint8_t  null_bit;  // 0
+    uint16_t null_pos;  // 0
+
+    uint16_t type;      // 0        I1(S1)
+    uint16_t length;    // 01
+    uint8_t  null_bit;  // 2
+    uint16_t null_pos;  // 0
+
+    uint16_t type;      // 0        I2(S2)
+    uint16_t length;    // 02
+    uint8_t  null_bit;  // 4
+    uint16_t null_pos;  // 0
+
+    uint16_t type;      // 0        I2(S3)
+    uint16_t length;    // 03
+    uint8_t  null_bit;  // 8
+    uint16_t null_pos;  // 0
+}
+
+header_length = 0x1a2, 从这个位置开始到 key_root = 0x400, 都是padding bytes.
+
+// .MYI Key Values
+// I1 Key Values at 0x400
+block header        00 12       // 00表示B-tree leaf, 0x12 = 18, 有2条索引,索引长度是8,总长度=2*8 + 2(header) = 18
+first key value     01 31
+first key pointer   0000 0000
+second key value    01 33
+second key pointer  0000 0002
+
+// I2 Key Values at 0x800
+block header        00 1c       // 0x1c = 28 = 2 * 0xd(13) + 2(header)
+first key value     01 61 61 01 62 20 20
+first key pointer   0000 0000
+second key value    01 61 61 01 62 62 62
+second key pointer  0000 0002
+
+key的内容包含了column的所有内容,可以看到char(3)里的空格也在索引里.
+对于fixed-row table,key pointer指向RowID
+key value前的01表示不为null,如果为null,则为0
+</code></pre>
+
+<pre><code class="language-c">// 总结一下
+.MYI文件开始:
+    uint8_t pad0[4+2];
+    uint8_t header_length[2];
+    uint8_t pad1[4];
+    uint8_t base_pos[2];
+    uint8_t pad2[2+2];
+    uint8_t keys;
+    uint8_t pad3[5];
+    uint8_t pad4[4];
+    uint8_t records[8];
+    uint8_t records_deleted[8];
+    uint8_t pad5[8];
+    uint8_t dellink[8];
+    uint8_t key_file_length[8];
+    uint8_t data_file_length[8];
+    uint8_t pad6[8*4+4*3];
+    uint8_t update_count[4];
+
+    uint8_t key_root[8]; // keys个key_root
+
+base_pos:
+    uint8_t pad7[8*5+4];
+    uint8_t record_length[4];
+    uint8_t pad8[4*4];
+    uint8_t fields[4];
+    uint8_t pad[4];
+    uint8_t record_reflength;
+    uint8_t key_reflength;
+    uint8_t pad9[2+2*5+2+2+4+6];
+
+keys个keydef:
+    uint8_t keysegs;
+    uint8_t key_alg;
+    uint8_t pad[2];
+    uint8_t block_length[2];
+    uint8_t keylength[2];
+    uint8_t pad10[4];
+
+    keysegs个keysegs:
+        uint8_t type;
+        uint8_t pad;
+        uint8_t null_bit;
+        uint8_t pad11[3+2];
+        uint8_t length[2];
+        uint8_t pad12[8];
+
+key values block:
+    uint8_t isLeaf:1;
+    uint8_t length;
+
+    key item:
+        uint8_t isNull;
+        value;
+        key_pointer;
+</code></pre>
+
+</div>
+<script src="../prism.js"></script>
+</body>
+</html>
