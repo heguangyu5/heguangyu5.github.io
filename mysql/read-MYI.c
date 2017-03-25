@@ -185,7 +185,7 @@ uint64_t buf2MysqlUint64()
 
 void printKeyValue(int *offset, struct keydef *keydef)
 {
-    int i, j;
+    int i, j, varcharLen;
     struct segdef *segdef;
 
     for (i = 0; i < keydef->segs; i++) {
@@ -203,20 +203,34 @@ void printKeyValue(int *offset, struct keydef *keydef)
                 printf("(NOT NULL %02x) ", buf[0]);
             }
         }
-        eat(segdef->len);
-        *offset += segdef->len;
         switch (segdef->type) {
             case KEY_TYPE_TEXT:
+                eat(segdef->len);
+                *offset += segdef->len;
                 printf("%.*s", segdef->len, buf);
                 break;
             case KEY_TYPE_USHORT_INT:
+                eat(segdef->len);
+                *offset += segdef->len;
                 printf("%u", buf2MysqlUint16());
                 break;
             case KEY_TYPE_UINT24:
+                eat(segdef->len);
+                *offset += segdef->len;
                 printf("%u", buf2MysqlUint24());
                 break;
             case KEY_TYPE_ULONG_INT:
+                eat(segdef->len);
+                *offset += segdef->len;
                 printf("%u", buf2MysqlUint32());
+                break;
+            case KEY_TYPE_VARTEXT1:
+                eat(2);
+                *offset += 2;
+                varcharLen = buf[1];
+                eat(varcharLen);
+                *offset += varcharLen;
+                printf("%.*s", varcharLen, buf);
                 break;
             default:
                 for (j = 0; j < segdef->len; j++) {
