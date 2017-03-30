@@ -99,16 +99,29 @@ mysql_create_table_no_lock(thd, create_table->db, create_table->table_name, ...)
 
     rea_create_table(); // create frm file
         mysql_create_frm();
-        /*
-            .frm文件开头的64字节是fileinfo
-            在fileinfo[6]处记录着IO_SIZE=0x1000
-            fileinfo[47]处记录着key_buff_length
-            fileinfo[28]处记录着key_info_length, 两者的主要区别是:buff_length是计算出来的值,info_length是实际长度
-            在.frm的IO_SIZE处,写入keybuff
-            在.frm的IO_SIZE + key_buff_length处,make_empty_rec()
-            再后边紧跟着connect_string,db_type,6个0,format_section_buff
-            在.frm的0x2000处记录着forminfo, screen_buff,pack_fields
-        */
+        file->ha_create_handler_files();
+        file->ha_create();
+
+// storage是怎么加载运行的?
+main()
+    init_server_components()
+        plugin_init()
+            // for each mysql_mandatory_plugins(builtin plugins)
+            // 执行cmake后在sql/sql_builtin.cc里可以找到myisam,csv
+                register_builtin() // static HASH plugin_hash[MYSQL_MAX_PLUGIN_TYPE_NUM];
+                plugin_initialize(); // only for MyISAM, CSV
+                    // MyISAM: ha_initialize_handerton()
+                        myisam_init(hton);
+            // for each plugin_array // 上边只init了MyISAM和CSV,其它builtin plugin在这里init
+                plugin_initialize();
+                    plugin->init();
+
+
+// 看看MyISAM是怎么实现create()方法和handler的ha_create_handler_files,ha_create的
+myisam_hton->create = myisam_create_handler(); => new ha_myisam();
+ha_myisam->init(); => cached_table_flags = HA_NULL_IN_KEY | HA_CAN_FULLTEXT | ...
+ha_myisam->ha_create_handler_files(); // return FALSE
+ha_myisam->ha_create(); => ha_myisam::create() => mi_create() 创建 .MYI .MYD 文件
 </code></pre>
 
 </div>
