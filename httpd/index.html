@@ -671,10 +671,10 @@ mod_mime: AddHandler
         create_connection();                                    |       create_connection();
         set conn vhost lookup data(default_list->names)         |       set conn vhost lookup data(default_list->names)
         if lookup failed, base_server = "a.example.com"         |       if lookup failed, base_server = "a.example.com"
-        while (keepalive) {                                     |       while (keepalive) {
+        do {                                                    |       do {
             read_request();                                     |           read_request();
             process_request();                                  |           process_request();
-        }                                                       |       }
+        } while (keepalive);                                    |       } while (keepalive);
         connection_count++;                                     |       connection_count++;
     }                                                           |   }
     child_exit();                                               |   child_exit();
