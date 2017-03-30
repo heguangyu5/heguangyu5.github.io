@@ -35,94 +35,80 @@ if (!silent) {
 </code></pre>
 
 <h3>mysql_create_table(THD *thd, TABLE_LIST *create_table, create_info, alter_info)</h3>
-<pre><code class="language-c">open_and_lock_tables();
+<pre><code class="language-c">/* 搞不清楚.frm文件的格式,编译一个debug版本的mysql nemiver一下.
+
+mkdir -p mysql-debug/data
+
+cd mysql-5.5.53
+mkdir bld
+cd bld
+cmake ..
+cmake-gui
+修改install path, data path, with_debug, generate
+make
+make install
+
+cd mysql-debug
+./scripts/mysql_install_db --defaults-file=debug.cnf
+
+cat debug.cnf
+[client]
+port = 3307
+socket = /tmp/mysqld-debug.sock
+
+[mysqld_safe]
+socket = /tmp/mysqld-debug.sock
+
+[mysqld]
+user = heguangyu5
+pid-file = /tmp/mysqld-debug.pid
+socket = /tmp/mysqld-debug.sock
+port = 3307
+basedir = /home/heguangyu5/tmp/mysql-debug
+datadir = /home/heguangyu5/tmp/mysql-debug/data
+
+./bin/mysqld_safe --defaults-file=debug.cnf
+./bin/mysqladmin --defaults-file=debug.cnf -uroot password '123456'
+mysql -h127.0.0.1 -uroot -p123456 -P 3307
+./bin/mysqladmin -h127.0.0.1 -uroot -p123456 -P 3307 shutdown
+
+nemiver ./bin/mysqld \
+    --defaults-file=debug.cnf \
+    --plugin-dir=/home/heguangyu5/tmp/mysql-debug/lib/plugin \
+    --log-error=/home/heguangyu5/tmp/mysql-debug/data/localhost.err
+
+File -> Open Source File -> sql/sql_table.cc
+*/
+
+open_and_lock_tables(); // 在lxr里找不到open_and_lock_tables(..., prelocking_strategy)
+                        // 这个函数定义在sql/sql_base.cc#5562
+                        // open_tables(..., prelocking_strategy)定义在sql/sql_base.cc#4837
+                        // 这个地方没有点其它的背景说明是搞不明白了.
+
 mysql_create_table_no_lock(thd, create_table->db, create_table->table_name, ...);
-    check_engine(); // Check if the table can be created in the specified storage engine.
-        ha_checktype();
-            handlerton *hton = ha_resolve_by_legacy_type(thd, database_type);
-            if (ha_storage_engine_is_enabled(hton)) {
-                return hton;
-            }
-            return ha_default_handlerton(thd);
-        // Check, if the given table name is system table, and if the storage engine does supports it.
-        ha_check_if_supported_system_table(*engine, db_name, table_name);
+    check_engine(); // 检查下对应的engine是否启用,以及创建表的名称和数据库的名称是否已占用.
+                    // 比如mysql.user表就不能创建
     set_table_default_charset();
 
+    // 调用engine的create()方法,create()方法返回一个handler,调用handler->init()方法
     handler *file = get_new_handler(handlerton* create_info->db_type);
-        if (db_type && db_type->state == SHOW_OPTION_YES && db_type->create) {
-            file = db_type->create(db_type, ...);
-            file->init();
-            return file;
-        }
-        return get_new_handler(ha_default_handlerton(current_thd));
 
-    mysql_prepare_create_table(
-        THD *thd,
-        HA_CREATE_INFO *create_info,    // create information, like MAX_ROWS
-        Alter_info *alter_info,         // list of columns and indexes to create
-        bool tmp_table,
-        uint *db_options,
-        handler *file,
-        KEY **key_info_buffer,
-        uint *key_count,
-        int select_field_count
-    );
+    mysql_prepare_create_table();
 
     ha_table_exists_in_engine(thd, db, table_name);
 
-    rea_create_table( // create frm file
-        THD *thd,
-        const char *path,
-        const char *db,
-        const char *table_name,
-        HA_CREATE_INFO *create_info,
-        List&lt;Create_field&gt; &create_fields,
-        uint keys,
-        KEY *key_info,
-        handler *file
-    );
+    rea_create_table(); // create frm file
         mysql_create_frm();
-        if (!create_info->frm_only && file->ha_create_handler_files(path, create_info)) {
-            ha_create_table();
-        }
-        /** .frm 文件格式 @see create_frm
-        offset  value
-        0       254
-        1       1
-        2       FRM_VER + 3 + test(create_info->varchar) = 9 + (0|1)
-                FRM_VER定义在include/mysql_version.h.in里,值为DOT_FRM_VERSION,
-                DOT_FRM_VERSION定义在cmake/mysql_version.cmake里,值为6
-                如果表里包含了varchar列,test(create_info->varchar)返回1
-        3       storage engine, MYISAM = 9, InnoDB = 12(0xc)
-        4       1
-        5       0
-        6-7     0x1000 = IO_SIZE
-        8-9     0
-        10-14   next_io_size(IO_SIZE + key_length + reclength + extra_size)
-        14-15   tmp_key_length = key_length, 如果没有定义索引就是0x10=16
-        16-17   reclength
-        18-21   create_info->max_rows
-        22-25   create_info->min_rows
-        26      set in mysql_create_frm()
-        27      2
-        28-29   set to key_info_length in mysql_create_frm()
-        30-31   create_info->table_options
-        32      0
-        33      5   // 5.0 frm file
-        34-37   create_info->avg_row_length
-        38      csid = create_info->default_table_charset->number; (uchar) csid
-        39      0
-        40      create_info->row_type
-        41      (uchar)(csid >> 8)
-        42-46   0
-        47-50   key_length
-        51-54   MYSQL_VERSION_ID
-        55-58   create_info->extra_size
-        59-60   extra_rec_buf_length
-        61      default_part_db_type
-        62-63   create_info->key_block_size
+        /*
+            .frm文件开头的64字节是fileinfo
+            在fileinfo[6]处记录着IO_SIZE=0x1000
+            fileinfo[47]处记录着key_buff_length
+            fileinfo[28]处记录着key_info_length, 两者的主要区别是:buff_length是计算出来的值,info_length是实际长度
+            在.frm的IO_SIZE处,写入keybuff
+            在.frm的IO_SIZE + key_buff_length处,make_empty_rec()
+            再后边紧跟着connect_string,db_type,6个0,format_section_buff
+            在.frm的0x2000处记录着forminfo, screen_buff,pack_fields
         */
-
 </code></pre>
 
 </div>

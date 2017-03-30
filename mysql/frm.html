@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="../prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">table.frm</h1>
+
+<pre>.frm文件开头的64字节是fileinfo
+在fileinfo[6]处记录着IO_SIZE=0x1000
+fileinfo[47]处记录着key_buff_length
+fileinfo[28]处记录着key_info_length, 两者的主要区别是:buff_length是计算出来的值,info_length是实际长度
+在.frm的IO_SIZE处,写入keybuff
+在.frm的IO_SIZE + key_buff_length处,make_empty_rec()
+再后边紧跟着connect_string,db_type,6个0,format_section_buff
+在.frm的0x2000处记录着forminfo, screen_buff,pack_fields
+
+.frm 64-65字节处的两个"//"是在make_new_entry()里写入的, 再后边的4个字节是fileinfo[10],一般为00 00 20 00
+</pre>
+
+<pre><code class="language-c">// fileinfo[64]
+0: 0xfe
+1: 1
+2: FRM_VER+3+varchar
+3: engine type
+4-5: 1 -> 3 (make_new_entry)
+6-7: IO_SIZE = 0x1000
+8-9: 0 -> 1 (make_new_entry)
+10-13: next_io_size(IO_SIZE + key_length + reclength + extra_size) = 0x2000
+       -> 0x3000 (after make_new_entry)
+14-15: key_length   // key_length怎么计算?
+                    // for each key: 8(heaer) + 9*N(key_part) + 1(name_sep_char) + strlen(name)
+                    // for all keys: 6(header) + 1(name_sep_char) + 9(extra bytes)
+                    // keys * (8 + key_parts * 9 + name_len + 1) + (6+1+9) + key_comment_total_bytes.
+16-17: reclength
+18-21: max_rows
+22-25: min_rows
+27: 2
+28-29: key_info_length, 实际key定义占的字节数
+30-31: table_options
+32: 0
+33: 5
+34-37: agv_row_length
+38: default_charset low byte
+39: 0
+40: row_type
+41: default_charset high byte
+42-46: 0
+47-48: key_length
+51-54: mysql_version_id
+55-58: extra_size
+62-63: key_block_size
+
+// 14-15和47-48的key_length其实是key_buff_length,程序根据这个大小分配出内存,然后在这块内存里pack_keys()
+// pack_keys()最终会返回实际占有的字节数,并保存在fileinfo[28]处.
+// 在.frm文件里,key定义是占有key_buff_length字节的,只不过没用上的部分为0而已
+
+0x1000:
+keybuff:
+0: key_count
+1: key_parts
+2: 0
+3: 0
+4-5: __pos__ 到keybuff结尾的长度
+
+// for each key
+0-1: key->flags ^ HA_NOSAME
+2-3: key->key_length
+4: key_parts
+5: key_alg
+6-7: block_size
+    // for each part
+    0-1: key_part->fieldnr + 1 + FIELD_NAME_USED
+    2-3: key_part->offset + data_offset + 1
+    4: 0
+    5-6: key_part->key_type
+    7-8: key_part->length
+
+__pos__: NAME_SEP_CHAR
+
+// for each key
+key_name
+NAME_SEP_CHAR
+0
+
+0
+
+// for each key
+key comment
+
+// empty record, reclength 在 forminfo[266]处
+// 2字节的connect_string length + connect_string
+// 2字节的engine name length + engine name
+// 6字节的0
+// 如果key有parser name,写入,不清楚什么是parser name
+
+
+// Format section
+// format_section_length = format_section_header_size + tablespace_length + 1 + create_fields.elements
+0-1: format_section_length
+2-5: format_section_flags
+6-7: format_section_unused
+tablespace
+// for each field
+one byte field_flags
+
+0x3000:
+
+// forminfo [288]
+0-1: info_length + create_fields.elements*FCOMP + 288 +nlength + int_length + com_length
+2-3: 0 -> 0x1000 (after make_new_entry)
+46: comment.length + comment
+256: screens
+258: create_fields.elements
+260: info_length
+262: totlength
+264: no_empty
+266: reclength
+268: n_length
+270: int_count
+272: int_parts
+274: int_length
+276: time_stamp_pos
+278: 80
+280: 22
+282: null_fields
+284: com_length
+
+// screen_buff
+
+// pack_fields
+
+</code></pre>
+
+<h3>open_binary_frm()</h3>
+/sql/table.cc?v=mysql-5.5.53#0730
+<pre><code class="language-c">// 在写read-frm.c时,有一个纠结的问题就是forminfo的位置.
+// open_binary_frm()里一开始就通过 get_form_pos() 取得了forminfo的位置
+// 这个位置在fileinfo的后边
+</code></pre>
+
+
+</div>
+<script src="../prism.js"></script>
+</body>
+</html>
