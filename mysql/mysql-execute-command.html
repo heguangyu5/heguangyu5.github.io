@@ -16,7 +16,8 @@
 switch (lex->sql_command) {
     case SQLCOM_CREATE_DB:      mysql_create_db();
     case SQLCOM_CREATE_TABLE:   mysql_create_table();
-    case SQLCOM_DROP_DB:        mysql_rm_db();
+    case SQLCOM_INSERT:         mysql_insert();
+    case SQLCOM_SELECT:         execute_sqlcom_select();
 }
 </code></pre>
 
@@ -122,6 +123,93 @@ myisam_hton->create = myisam_create_handler(); => new ha_myisam();
 ha_myisam->init(); => cached_table_flags = HA_NULL_IN_KEY | HA_CAN_FULLTEXT | ...
 ha_myisam->ha_create_handler_files(); // return FALSE
 ha_myisam->ha_create(); => ha_myisam::create() => mi_create() 创建 .MYI .MYD 文件
+</code></pre>
+
+<h3>mysql_insert()</h3>
+<pre><code class="language-c">open_and_lock_tables();
+mysql_prepare_insert();
+write_record();
+    talbe->file->ha_write_row(); => ha_myisam::write_row(); => mi_write();
+</code></pre>
+
+<h3>execute_sqlcom_select()</h3>
+<pre><code class="language-c">open_and_lock_tables();
+handle_select();
+    if (union) {
+        mysql_union();
+    } else {
+        mysql_select();
+    }
+
+// mysql_union() 最终也是执行mysql_select()
+mysql_select()
+    if (select_lex->join != 0) {
+        // union
+        join = select_lex->join;
+    } else {
+        join = new JOIN();
+    }
+    join->optimize();
+        make_join_readinfo()
+            for (i = join-&gt;const_tables; i &lt; join-&gt;tables; i++) {
+                JOIN_TAB *tab = join->join_tab + i;
+                tab.next_select = sub_select();
+                pick_table_access_method(tab);
+                    JT_CONST:   read_first_record = join_read_const;
+                                read_record       = join_no_more_records;
+                    JT_EQ_REF:  read_first_record = join_read_key;
+                                read_record       = join_no_more_records;
+                    JT_REF:     read_first_record = join_read_always_key;
+                                read_record       = join_read_next_same;
+                    // ...
+            }
+            join->join_tab[join->tables-1].next_select = 0;
+    join->exec();
+        do_select(curr_join, curr_fields_list, NULL, procedure);
+            join->join_tab[join->table-1].next_select = end_send;
+            join_tab = join->join_tab + join->const_tables;
+            if (join->tables === join->const_tables) {
+                // tables和const_tables什么区别?
+                // 如果表里只有一条记录或者是通过主键或uniq key做的select,这些table称为const table
+                if (!conds || conds->val_int()) {
+                    // 如果有其它where条件, conds->val_int() 返回1表示match,返回0表示not match
+                    end_send();
+                }
+            } else {
+                sub_select();
+                    (*join_tab->read_first_record)(join_tab);
+                    evaluate_join_record(join, join_tab, error);
+                        // 如果还有其它join,继续sub_select()
+                        rc = (*join_tab->next_select)(join, join_tab+1, 0); => sub_select();
+                        // 否则,返回 OK 或 NO_MORE_ROWS
+                    while (rc == NESTED_LOOP_OK) {
+                        read_record();
+                        rc = evaluate_join_record();
+                    }
+
+                /*
+                    sub_select()
+                        read_first_record()
+                        evaluate_join_record()
+                            sub_select()
+                                read_first_record()
+                                evaluate_join_record()
+                                    end_send()
+                                while (OK) {
+                                    read_record() => join_no_more_records(); => -1 // EQ_REF
+                                    evaluate_join_record() => NO_MORE_ROWS
+                                }
+                                return OK;
+                            return OK;
+                        while (OK) {
+                            read_record() => rr_sequential()
+                            evaluate_join_record()
+                                sub_select()
+                                    read_first_record()
+                                    evaluate_join_record()
+                        }
+                */
+            }
 </code></pre>
 
 </div>
