@@ -72,25 +72,27 @@ init_std_data(struct entropy_store *r)
 
 mix_pool_bytes => mix_pool_bytes_extract(r, data, datalen)
     // mix_pool_bytes做的事就是把参数提供的数据做一系列的转换计算然后填充到r->pool里
-    // 也就是input_pool_data,blocking_pool_data,nonblocking_pool_data里
 
 // OK, 大概明白了,随机数分别存储在三个pool_data数组里,entropy_count记录着数组里可用的随机数有多少个.
 // module_init()时,把entropy_count设为0,并使用当前时间和utsname初始化这三个pool_data
-// 然后当kernel在处理input event,irq event,disk event时,会调用random module提供的add_*randomness方法继续向
-// pool_data里添加数据,并更新entropy_count
+// 然后当kernel在处理input event,irq event,disk event时,会调用random module提供的add_*randomness方法向input_pool里添加数据,并更新entropy_count.
+// 当需要随机数时,如果blocking_pool,nonblocking_pool里的数据不足,会从input_pool里move过去(xfer_secondary_pool).
 
 get_random_bytes(void *buf, int nbytes)
     extract_entropy(&nonblocking_pool, buf, nbytes, min = 0, reserved = 0);
 random_read()
     while (nbytes) {
         extract_entropy_user(&blocking_pool, buf, n);
+        if (n == 0) {
+            wait_event_interruptible(random_read_wait);
+        }
     }
 urandom_read()
     extract_entropy_user(&nonblocking_pool, buf, n);
 // 这三个方法的根本区别在pool.limit,blocking_pool.limit = 1, nonblocking_pool.limit = 0
 // 在调用extract_buf()前,会调用account()根据pool.entropy_count修正要从pool里取多少随机数出来
 // limit=1时,会修正,limit=0时,不修正
-// 所以读取nonblocking_pool,指定了读多少字节,就返回多少字节,但是读blocking_pool,可能返回的比期望的少
+// 所以读取nonblocking_pool,指定了读多少字节,就返回多少字节,但是读blocking_pool,可能返回的比期望的少,甚至为0.
 // 由于random_read()将extract方法包在了while里,所以就会有man page里说的 
 // "When  the  entropy  pool  is empty, reads from /dev/random will block until additional environmental noise is gathered."
 
