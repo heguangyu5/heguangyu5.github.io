@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="../prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">InnoDB</h1>
+
+<pre>InnoDB在改变数据的时候,它会把这次改动的记录写到log buffer里.
+log buffer写满,事务提交,或每一秒钟,不管哪种情况先发生,InnoDB都会把log buffer写到硬盘上的日志文件里.
+
+log buffer的大小可以通过执行 
+    show variables like 'innodb_log_buffer_size';
+得到.
+日志文件的大小和个数可以通过执行 
+    show variables like 'innodb_log_file_size';
+    show variables like 'innodb_log_files_in_group';
+得到.
+
+怎么在生产环境里计算出合适的 log buffer size 和 log file size 呢?
+在一段时间里多次执行 show status like 'Innodb_os_log_written'; 可以得到这段时间里InnoDB向日志文件写了多少数据.
+从而可以计算出大约每秒会产生多大的日志数据.
+由于InnoDB每秒都会写日志,所以log buffer的大小据此就能定下来,至于log file的大小,那就要看想保存多长时间的日志了.
+
+InnoDB数据自身保存成B+Tree结构,插入时,数据自身直接插入了.
+如果插入的同时还需要更新secondary index,如果secondary index在buffer pool里,则直接插入.
+否则如果secondary index不是unique的,则将此次插入放入insert buffer,后边再合并插入.
+
+InnoDB通过后台线程将脏页写到磁盘上,在写之前,先把脏页copy到doublewrite buffer里,之后再将doublewrite buffer写到磁盘上,再然后才真正将脏页写到磁盘上.
+1. 如果doublewrite buffer写磁盘出错,那么原始数据还没有被修改.
+2. 如果doublewrite buffer写磁盘成功,脏页写磁盘出错,那么可以用doublewrite buffer恢复.
+因此,doublewrite buffer保证了数据的可靠性.
+
+通过执行
+    show status like 'Innodb_dblwr_pages_written';
+    show status like 'Innodb_dblwr_writes';
+可以看出服务器写入负载的情况.
+如果写入压力比较大,那么pages_written/writes的值也比较大.如果写入压力比较小,那么pages_written/writes的值也比较小.
+在写入压力最大时,InnoDB每秒都会写100个脏页到磁盘,那么pages_written/writes = 100.也就是说,越接近100,写入压力越大.
+
+</pre>
+
+</div>
+<script src="../prism.js"></script>
+</body>
+</html>
