@@ -5,35 +5,25 @@
 mkdir tmp_initrd_dir
 cd tmp_initrd_dir
 
-# 第一步
-mkdir -p bin dev usr/sbin usr/bin sbin
+mkdir bin sbin usr usr/bin usr/sbin proc sys dev sda1
 cd dev
 sudo mknod tty c 5 0
+sudo mknod tty0 c 4 0
 sudo mknod tty1 c 4 1
+sudo mknod sda b 8 0
+sudo mknod sda1 b 8 1
 cd ..
 cp ../busybox ./bin/
 sudo chroot ./ /bin/busybox --install -s
+
 echo "#!/bin/sh" > ./init
-echo "setsid cttyhack sh" >> ./init
+echo "mount -t proc none /proc" >> ./init
+echo "mount -t sysfs none /sys" >> ./init
+echo "mount -t ext3 /dev/sda1 /sda1" >> ./init
+echo "mount -t proc none /sda1/proc" >> ./init
+echo "mount -t sysfs none /sda1/sys" >> ./init
+echo "exec switch_root /sda1 /sbin/init" >> ./init
 chmod +x ./init
-
-# mount-root
-if [ "$1" == "mount-root" ]
-then
-    cd dev
-    sudo mknod tty0 c 4 0
-    sudo mknod sda b 8 0
-    sudo mknod sda1 b 8 1
-    cd ..
-    mkdir -p mnt/root proc sys
-    echo "#!/bin/sh" > ./init
-    echo "mount -t proc none /proc" >> ./init
-    echo "mount -t sysfs none /sys" >> ./init
-    echo "mount -o ro /dev/sda1 /mnt/root" >> ./init
-    echo "setsid cttyhack sh" >> ./init
-    echo "exec switch_root /mnt/root /sbin/init" >> ./init
-fi
-
 
 find . | cpio --quiet -H newc -o | gzip -9 -n > ../busybox.img.gz
 cd ../
@@ -45,3 +35,6 @@ sudo cp busybox.img.gz /mnt/initrd.img.gz
 sync
 sudo umount /mnt/
 sudo losetup -d /dev/loop1
+
+rm my-linux.vdi
+VBoxManage convertdd my-linux.img my-linux.vdi --format VDI
