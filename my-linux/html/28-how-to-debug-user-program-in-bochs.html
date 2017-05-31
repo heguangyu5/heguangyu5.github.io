@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../../bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="../../prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">怎么在bochs里调试自己写的程序?</h1>
+
+<pre>由于bochs里可以方便的查看stack,内存,以及程序执行的全过程,所以能在bochs里调试程序还是很不错的.
+
+关键点就在于怎么设一个break point.
+
+bochs 支持 memory watch point.
+
+1) 在自己的程序里拿到一块内存.
+2) 向这块内存的一个位置写入一个字节.这样做是确保page table map到了实际的物理内存.
+3) 打印出这个内存的地址.然后调用fgets(buf)暂停程序执行
+4) 使用tools/calc-pgt addr计算出page table offset
+5) 在bochs里找到实际的物理内存的位置,确认上边写入的字节
+6) 然后确定上边那个字节附近的一个位置,设为memory watch point(watch w addr)
+7) 向那个位置上写入另一个字节,break point找到了.
+</pre>
+
+<pre><code class="language-c">void break_point(void) {
+    static got_break_point;
+    if (got_break_point) {
+        return;
+    }
+
+    got_break_point = 1;
+
+    char *mem = malloc(1024);
+    mem[0] = 5;
+    printf("mem = %p\n", mem);
+
+    printf("press enter to continue\n");
+    char buf[100];
+    fgets(buf);
+
+    mem[1] = 5;
+    mem[2] = 5;
+    mem[3] = 5;
+
+    free(mem);
+}
+</code></pre>
+
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+<br>
+</div>
+<script src="../../prism.js"></script>
+</body>
+</html>
