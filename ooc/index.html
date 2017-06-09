@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="../prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">greg</h1>
+greg.g是个leg. 其中定义了GREG Grammar.<br>
+关键逻辑在tree.c里.<br>
+数据结构定义在greg.h里.<br>
+tree.c里定义了一个<code>static Node *stack[1024];</code>,greg执行过程中会把生成的node push到这个stack里.<br>
+我们拿username.leg来分析一下.
+<pre>%{
+#include <unistd.h>
+%}
+
+start =	"username"	{ printf("%s", getlogin()); }
+|	< . >		{ putchar(yytext[0]); }
+
+%%
+
+int main()
+{
+  GREG g;
+  yyinit(&g);
+  while (yyparse(&g));
+  yydeinit(&g);
+  return 0;
+}
+
+/*
+    grammar= - ( declaration | definition )+ trailer? end-of-file
+    declaration 对应着开头的 %{...%}, 要执行的操作是 makeHeader(),开头部分被放到了headers链表里.
+    trailer? 对应着结尾的 %% ..., 要执行的操作是 makeTrailer(),结尾部分被放到了trailer里.
+    definition部分的结构是 identifier = expression, 对应着 start = ...
+    expression是由一个或多个sequence组成的,对应着 "username" ... | < . > ...
+    sequence是由一个或多个prefix组成的,prefix说的是peg的&!,如果没有&!,那就是suffix,
+            suffix是prefix的特例. suffix对应着peg的?+*,如果没有?+*,那就是primary.
+            primary是suffix的特例.
+    primary是主体内容, "username" => literal, { printf("%s", getlogin()); } => action 都是primary
+
+
+
+    greg执行时,yyparse的过程如下:
+
+    先匹配到 identifier="start", makeRule, push到stack里.
+    后边的两个sequence实际上是 prefix (prefix)*
+    第一个sequence:
+        前一个prefix(primary)是makeString("username") => push,
+        后一个prefix(primary)是makeAction({printf(...)}) => push.
+        执行到后一个prefix时,pop出来action,然后再pop出来string,然后makeSequence(), "username"(->printf) => push
+    后一个sequence:
+        前一个prefix(primary)是BEGIN makePredicate => push
+        后一个prefix(primary)有多个:
+            1. makeDot => push
+            2. pop Dot, pop BEGIN, makeSequence, "BEGIN"(Dot) => push
+            3. END makePredicate => push
+            4. pop END, pop BEGIN sequence, makeSequence, "BEGIN"(Dot)"End" => push
+            5. makeAction(putchar) => push
+            6. pop putchar, pop BEGIN(Dot)End, makeSequence, BEGIN(Dot)End("putchar")
+        然后sequence, pop "putchar sequence", pop "username sequence", makeAlternte, "username" | Dot => push
+    EQUAL expression: pop alternate, pop start, set expression, "start" -> username | dot
+
+    yyparse过后,Rule_compile_c_header()输出了固定的header,里边define了RULECOUNT,username.leg只有一个rule.
+    然后输出了yyparse过程中拿到的header.
+    接着Rule_compile_c(rules)输出后preamble.preamble里定义了struct _GREG.以及其它yyXXX方法.
+    然后遍历所有的rules,给每个rule输出了个yy_RULENAME的定义.
+    再遍历所有的action,输出yyACTIONNAME函数,函数实现里加入了一些调试信息,接下来就是grammer里的action内容了.
+    最后输出了footer和trailer.
+
+    GREG生成的代码里多了几个方法: yyparse_new, yyparse_free, yyinit, yydeinit
+    并且重新定义了yyparse和yyparse_from.
+*/
+</pre>
+
+<h1 class="page-header">OOC: rock</h1>
+
+<pre>// main入口: rock/source/rock/rock.ooc
+CommandLine new(args)
+    params = BuildParams new(args[0])
+        // rock的标准用法是 git clone 一份源码, make rescue 编译一个 /path/to/git-rock/bin/rock 出来
+        // 然后 make install 做一个软链接到 /usr/bin/rock
+        // 1. BuildParams init 里根据 argv[0]="rock" 在 $PATH 里找到 /usr/bin/rock, 再调用realpath找到
+        //    /path/to/git-rock/bin/rock, 然后将 /path/to/git-rock 记为 distLocation.
+        //    这种做法挺巧妙的!
+        //    由于sdk.use什么的都在git-rock目录里,所以软链接的这种做法实际上不需要配置OOC_LIBS.
+        // 2. BuildParams init 然后会把几个目录加到 libsPaths 里, distLocation, 也就是git-rock目录肯定会加进去的
+        // 3. defines add GC_DEFINE="__OOC_USE_GC__", "GC_NO_THREAD_REDIRECTS"
+        // 4. errorHandler = DefaultErrorHandler
+    params bake
+        // defines add DEBUG_DEFINE="__OOC_DEBUG__"
+        // 默认情况下rock编译出来的结果是debug模式的
+        // 由于host == "", bake到此结束了
+    // 在当前目录下寻找.use文件,如果找不到,报错退出
+    prepareCompilationFromUse(uzeFile: File, modulePaths: ArrayList<String>, crucial: Bool, targetModule: Module@)
+        uze = UseDef new("xxx") // xxx.use
+        uze read(uzeFile, params)
+        // 如果 xxx.use 里定义了 main, 那就是要编译一个可执行文件出来,否则就是要编译一个lib出来
+        if (uze main) {
+            uze apply(params) // 根据xxx.use进一步补充 params 信息
+            modulePaths add(uze main)
+        }
+    for(modulePath in modulePaths) {
+        parse(modulePath replaceAll('/', File separator))
+    }
+
+parse(moduleName)
+    module := Module new("main", "src", params, nullToken)
+    module main = true
+    AstBuilder new("main.ooc", module, params)
+        module addUse(Use new("sdk", params, module token))
+        nq_parse(this, modulePath)
+            NagaQueenCore *core = {
+                .this = this,
+                .path = modulePath
+            };
+            GREG *G = {
+                .data = core
+            };
+            while (yyparse(G));
+            return 0;
+            // 以 "hello world" println() 为例:
+            // '"'           => nq_onStringLiteralStart
+            // 'hello world' => nq_onStringTextChunk
+            // '"'           => nq_onStringLiteralEnd
+            // 'println()'   => nq_onFunctionCallStart, nq_onFunctionCallEnd, nq_onFunctionCallExpr
+                    AstBuilder stack
+                    push(module)
+                    stack push(StringLiteral new(token()))  // nq_onStringLiteralStart
+                    stack peek(), value += "hello world"    // peek()从stack里取出元素但不删除
+                                                            // nq_onStringTextChunk
+                    stack pop();                            // nq_onStringLiteralEnd
+                    stack push(FunctionCall new(name toString(), token())); // nq_onFunctionCallStart
+                    FunctionCall name = "println"
+                    stack pop();                            // nq_onFunctionCallEnd
+                    FunctionCall expr = "hello world";      // nq_onFunctionCallExpr
+
+    postParsing(module)
+        allModules := module collectDeps()
+        for (module in allModules) {
+            ImportClassifier classify(module)
+        }
+        if(params backend == "c") {
+            params driver compile(module)
+        }
+</pre>
+
+</div>
+<script src="../prism.js"></script>
+</body>
+</html>
