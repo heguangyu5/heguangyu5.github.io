@@ -79,6 +79,14 @@ int main()
 */
 </pre>
 
+<h1 class="page-header">nagaqueen</h1>
+<pre>greg nagaqueen.leg生成的.c文件用来解析.ooc文件.
+grammar的action部分定义了很多on_XXX的方法.实现了这些方法,也就能把ooc文件转换成C语言或其它语言了.
+
+grammar里定义了一个关键词 unmangled, ooc里如果一个func标有这个关键词,那么生成的代码里名称就保持不变.
+这样就可以用ooc实现这些on_XXX的方法,然后和nagaqueen.c编译在一起.这就是rock了.
+</pre>
+
 <h1 class="page-header">OOC: rock</h1>
 
 <pre>// main入口: rock/source/rock/rock.ooc
