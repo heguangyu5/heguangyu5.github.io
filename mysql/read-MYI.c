@@ -224,6 +224,11 @@ void printKeyValue(int *offset, struct keydef *keydef)
                 *offset += segdef->len;
                 printf("%u", buf2MysqlUint32());
                 break;
+            case KEY_TYPE_ULONGLONG:
+                eat(segdef->len);
+                *offset += segdef->len;
+                printf("%lu", buf2MysqlUint64());
+                break;
             case KEY_TYPE_VARTEXT1:
                 eat(2);
                 *offset += 2;
@@ -233,6 +238,8 @@ void printKeyValue(int *offset, struct keydef *keydef)
                 printf("%.*s", varcharLen, buf);
                 break;
             default:
+                eat(segdef->len);
+                *offset += segdef->len;
                 for (j = 0; j < segdef->len; j++) {
                     printf("%02x ", buf[j]);
                 }
