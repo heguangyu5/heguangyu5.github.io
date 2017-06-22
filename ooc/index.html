@@ -114,49 +114,78 @@ CommandLine new(args)
             uze apply(params) // 根据xxx.use进一步补充 params 信息
             modulePaths add(uze main)
         }
+        // UseDef就是简单地对use file读取,做字符串分割.
+        // 处理的结果在apply时合并进了params sourcePath,合并时将sourcePath的相对路径转换成了绝对路径.
     for(modulePath in modulePaths) {
         parse(modulePath replaceAll('/', File separator))
+            module new(...);
+            // 一个.ooc文件就是一个module
+            // path, fullName, simpleName, underName, pathElement, oocPath
+            // 在linux下path=fullName,simpleName是fullName路经的最后一个,underName将/替换成了_
+            // oocPath是.ooc文件的绝对路径
+            AstBuilder new(modulePath, module, params)
+            // modulePath main.ooc的绝对路径 /path/to/main.ooc
+            // module main.ooc表示的module
+            // params sourcePath里记录着src目录
+                stack = Stack&lt;Object&gt; new()
+                stack push(module)
+                module addUse(Use new("sdk"))
+                // 从params libsPaths里找到sdk.use,读取并解析. sdk.use的关键部分是imports
+                // 这些imports都加到了module里
+                nq_parse(this, modulePath)
+                // 从这里开始就是nagaqueen.leg里定义的grammar了
+                // 我们从最简单的看起 "hello" println(), 它的grammer是:
+                    Module:
+                        ModuleCore: WS stmt:Stmt WS { nq_onStatement(core->this, stmt) }
+                            Stmt:
+                                StmtCore: e:EoledStatement
+                                    EoledStatement: WS Expr
+                                        Expr: b:BinaryOperation
+                                            BinaryOperation = Assignment = l: Ternary = cond:NullCoalescing = l: LogicalOr
+                                                            = l:LogicalAnd = l:BinaryOr = l:BinaryXor = l:BinaryAnd = l:Equality
+                                                            = l:Inequality = l:Range = l:Shift = l:Sum = l:Product = ProductCore
+                                                            = l:SafeNavAccess = expr:Access
+                                                Access: l:Value (call:FunctionCall { nq_onFunctionCallExpr(core->this, call, l); $$=l=call; })
+                                                // OK, grammar最终定位到 Value FunctionCall
+                    Value:
+                        ValueCore:
+                            s:STRING_LIT: '"' { tokenPos; nq_onStringLiteralStart(core->this); }
+                                          (StringChunk)*
+                                          DOUBLE_QUOTE
+                                          -  { $$=nq_onStringLiteralEnd(core->this); }
+                                StringChunk: TextChunk
+                                    TextChunk: < (!'"' TextInside ) > { nq_onStringTextChunk(core->this, yytext); }
+                    FunctionCall: callName:IDENT { tokenPos; nq_onFunctionCallStart(core->this, callName); }
+                                  FunctionCallCore { $$=nq_onFunctionCallEnd(core->this); }
+                        IDENT: IDENT_CORE
+                            IDENT_CORE: !(KW ![A-Za-z0-9_])  # a keyword is not an ident
+                                        < [a-zA-Z_][0-9a-zA-Z_]* > { $$=yytext; }
+                                        ( '?' { $$=nq_trailingQuest($$); }
+                                        | '!' { $$=nq_trailingBang($$); })?
+                        FunctionCallCore: '(' WS WS CLOS_PAREN
+                // 方法调用顺序是:
+                    nq_onStringLiteralStart()   // stack push(StringLiteral new(token())) token()方法生成一个新token,记录了token的开始位置,长度,所属module,所在行
+                    nq_onStringTextChunk()      // stack peek() + textChunk
+                    nq_onStringLiteralEnd()     // pop(StringLiteral) => l
+                       看情况: nq_trailingQuest() OR nq_trailingBang() // ? => __request, ! => __bang
+                    nq_onFunctionCallStart()    // stack push(FunctionCall new(name toString(), token()))
+                    nq_onFunctionCallEnd()      // pop(FunctionCall) => call
+                    nq_onFunctionCallExpr()     // call expr = l
+                    nq_onStatement()            // gotStatement(stmt)
+                                                // peek(Node) 此时stack里只剩下module
+                                                // module body add(stmt)
+                                                // module body是个ArrayList&lt;Statement&gt;
+            postParsing(module)
+                module parseImports(null)           // 将此module import进来的其它module都new一个AstBuilder (递归)
+                allModules := module collectDeps()  // 将所有module都放到allModules里 (递归)
+                Tinkerer new(params) process(allModules)
+                for (module in allModules) {
+                    ImportClassifier classify(module)   // .h -fwd.h
+                }
+                params driver compile(module) => SequenceDriver compile(module)
+                    CGenerator new(params, module) write()
+                success(params)
     }
-
-parse(moduleName)
-    module := Module new("main", "src", params, nullToken)
-    module main = true
-    AstBuilder new("main.ooc", module, params)
-        module addUse(Use new("sdk", params, module token))
-        nq_parse(this, modulePath)
-            NagaQueenCore *core = {
-                .this = this,
-                .path = modulePath
-            };
-            GREG *G = {
-                .data = core
-            };
-            while (yyparse(G));
-            return 0;
-            // 以 "hello world" println() 为例:
-            // '"'           => nq_onStringLiteralStart
-            // 'hello world' => nq_onStringTextChunk
-            // '"'           => nq_onStringLiteralEnd
-            // 'println()'   => nq_onFunctionCallStart, nq_onFunctionCallEnd, nq_onFunctionCallExpr
-                    AstBuilder stack
-                    push(module)
-                    stack push(StringLiteral new(token()))  // nq_onStringLiteralStart
-                    stack peek(), value += "hello world"    // peek()从stack里取出元素但不删除
-                                                            // nq_onStringTextChunk
-                    stack pop();                            // nq_onStringLiteralEnd
-                    stack push(FunctionCall new(name toString(), token())); // nq_onFunctionCallStart
-                    FunctionCall name = "println"
-                    stack pop();                            // nq_onFunctionCallEnd
-                    FunctionCall expr = "hello world";      // nq_onFunctionCallExpr
-
-    postParsing(module)
-        allModules := module collectDeps()
-        for (module in allModules) {
-            ImportClassifier classify(module)
-        }
-        if(params backend == "c") {
-            params driver compile(module)
-        }
 </pre>
 
 </div>
