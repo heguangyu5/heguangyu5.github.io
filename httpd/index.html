@@ -411,13 +411,8 @@ prefork_open_logs();
                                 根据source,dest找到sock,然后如果sk->sk_state=TCP_LISTEN,调用tcp_v4_hnd_req() => inet_csk_search_req() => tcp_check_req()
                                 如果一切OK,并且listen backlog,也就是icsk_accept_queue没有overflow,就把这个sock加到icsk_accept_queue
                                 如果overflow了,sysctl_tcp_abort_on_overflow的话,RESET,否则返回NULL.
-                                返回NULL的情况下,那么这个packet就丢掉了
 
-                                test-backlog-queue 实测结果:
-                                　设backlog为2,server　accept 1个连接去处理后,还可以再接受3个连接(backlog queue?), 
-                                　第4个连接时, client回复ACK后, server还是会不停地重发 SYN_ACK, 就好像没有收到client的ACK一样. 这也就验证了上边说的backlog overflow的话, ACK packet丢掉的情况.
-                                　这也就是说backlog的大小实际上是listen()参数加1
-                                　对于丢掉了ACK packet的那个连接,client之后向server发送数据时,会PUSH ACK,server还能收到.
+                                @see https://hgy5.me/index/post/?id=54
                           */
     ap_mpm_pod_open();  // create了一个pipe,并且closeonexec,不知道做什么用的
 </code></pre>
