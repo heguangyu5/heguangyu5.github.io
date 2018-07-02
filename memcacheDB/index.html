@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="../prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">memcacheDB</h1>
+
+<h3>main()</h3>
+<pre><code class="language-c">// main()一开始先register signal callback
+signal(SIGTERM, sig_handler);
+signal(SIGQUIT, sig_handler);
+signal(SIGINT,  sig_handler);
+
+// sig_handler做两件事:
+// daemon_quit = 1
+// event_base_loopexit(main_base, 0)
+//  event_base_loopexit()调用后,如果当前有event待处理,会处理完所有event后再退出
+
+settings_init();
+    access = 0700; // unix domain socket 权限
+    port = 21201;
+    udpport = 0;
+    item_buf_size = 2 * 1024;
+    maxconns = 4 * 1024;
+    num_threads = 4;
+
+mdb_settings_init();
+    env_home = DBHOME = "/data1/memcachedb";
+    cache_size = 1GB;
+    txn_nosync = 0;
+    chkpoint_val = 60*5;
+    env_flags = MDB_WRITEMAP;
+
+// 接下来通过getrlimit,setrlimit调整进程可打开的文件数
+// daemonize
+// 如果以root用户启动,则切换到-u参数指定的非root用户身份上去
+
+main_base = event_init();
+
+item_init();    // freeitem = malloc();
+stats_init();   // stats
+conn_init();    // freeconns = malloc();
+
+// ignore SIGPIPE
+
+thread_init(settings.num_threads, main_base);
+    threads = malloc(LIBEVENT_THREAD * num_threads)
+    // 给每个thread创建一个base,并创建一个pipe,并监控notify_receive_fd的EV_READ
+    for (i = 1; i &lt; nthreads; i++) {
+        pthread_create(&thread, &attr, worker_libevent, &threads[i]);
+        worker_libevent(LIBEVENT_THREAD *thread)
+            event_base_loop(thread->base, 0);
+    }
+
+// 到此,除main_thread外的其它threads都event_base_loop()了
+
+server_socket(settings.port); // listen, main_base EV_READ
+
+mdb_setup();
+    mdb_env_create(&env);
+    mdb_env_set_mapsize(env, mdb_settings.cache_size = 1GB);
+    // 如果 num_threads 大于 mdb_env_get_maxreaders,那就调用 mdb_env_set_maxreaders(env, num_threads)
+    // 如果mdb_settings.env_home不存在,则创建该目录
+    mdb_env_open(env, env_home, env_flags, 0640);
+     if (mdb_settings.txn_nosync){
+        mdb_env_set_flags(env, MDB_NOSYNC, 1);
+     }
+    mdb_txn_begin(env, NULL, 0, &txn);
+    mdb_open(txn, NULL, 0, &dbi);
+    mdb_txn_commit(txn);
+
+// lmdb::mdb_env_sync()的文档里说mdb_txn_commit()时,如果没有设MDB_NOSYNC flag,lmdb会flush os buffer
+// 而默认的设置就是没有设nosync flag的,这样checkpoint_thread好像就不需要了
+start_checkpoint_thread();
+    pthread_create(&chk_ptid, NULL, mdb_chkpoint_thread, env);
+mdb_chkpoint_thread()
+    // 每隔mdb_settings.chkpoint_val秒执行一次mdb_env_sync(env, 1).
+
+event_base_loop(main_base, 0); // 到此,main_thread也进入loop了
+
+/*
+总结下:
+    每个thread都有一个base,都在监控notify_received_fd的EV_READ
+    main_thread创建并监控listen socket,然后打开了mdb,启动了checkpoint thread,之后进入loop.
+*/
+</code></pre>
+
+<h3>drive_machine(conn *c)</h3>
+<pre><code class="language-c">// 所有的conn都保存在freeconns这个指针数组里
+// 默认这个数组大小是200,如果不够用了,大小会加倍
+// 具体到每个conn,是临时calloc的,然后加到freeconns里,这样做可以复用conn.
+switch (c->state) {
+    case conn_listening:
+        fd = accept();
+        dispatch_conn_new(fd, conn_read, EV_READ, ...);
+            cq_push(threads[thread].new_conn_queue, item);
+            write(threads[thread].notify_send_fd, "", 1);
+        break;
+    // accept一个新连接后(状态是conn_read),选择一个thread,将这个新连接push到这个thread的queue里,并通过write notify_send_fd通知这个thread
+    // 前边每个thread在创建的时候都在监控其notify_received_fd的EV_READ,callback function是 thread_libevent_process
+    // thread_libevent_process从自己的new_conn_queue里peek出一个item,然后创建一个新连接
+    case conn_read:
+        try_read_command(c);
+            process_command();
+                // db_checkpoint: mdb_env_sync()
+                // verbosity: settings.verbose
+                // quit
+                // version
+                // stats
+                // delete: mdb_txn_begin(),mdb_del(),mdb_txn_commit()
+                // decr,incr
+                // rget
+                // add,set,replace,prepend,append: mdb_txn_begin(),mdb_put(),mdb_txn_commit().
+                // get: mdb_txn_begin(),mdb_cursor_open(),mdb_cursor_get(),mdb_cursor_close(),mdb_txn_abort()
+        try_read_network(c);
+        break;
+}
+</code></pre>
+
+</div>
+<script src="../prism.js"></script>
+</body>
+</html>
