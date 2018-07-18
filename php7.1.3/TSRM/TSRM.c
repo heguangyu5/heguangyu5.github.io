@@ -15,9 +15,7 @@
 
 #include <stdio.h>
 
-#if HAVE_STDARG_H
 #include <stdarg.h>
-#endif
 
 typedef struct _tsrm_tls_entry tsrm_tls_entry;
 
@@ -61,25 +59,6 @@ int tsrm_error(int level, const char *format, ...);
 static int tsrm_error_level;
 static FILE *tsrm_error_file;
 
-#if TSRM_DEBUG
-#define TSRM_ERROR(args) tsrm_error args
-#define TSRM_SAFE_RETURN_RSRC(array, offset, range)																		\
-	{																													\
-		int unshuffled_offset = TSRM_UNSHUFFLE_RSRC_ID(offset);															\
-																														\
-		if (offset==0) {																								\
-			return &array;																								\
-		} else if ((unshuffled_offset)>=0 && (unshuffled_offset)<(range)) {												\
-			TSRM_ERROR((TSRM_ERROR_LEVEL_INFO, "Successfully fetched resource id %d for thread id %ld - 0x%0.8X",		\
-						unshuffled_offset, (long) thread_resources->thread_id, array[unshuffled_offset]));				\
-			return array[unshuffled_offset];																			\
-		} else {																										\
-			TSRM_ERROR((TSRM_ERROR_LEVEL_ERROR, "Resource id %d is out of range (%d..%d)",								\
-						unshuffled_offset, TSRM_SHUFFLE_RSRC_ID(0), TSRM_SHUFFLE_RSRC_ID(thread_resources->count-1)));	\
-			return NULL;																								\
-		}																												\
-	}
-#else
 #define TSRM_ERROR(args)
 #define TSRM_SAFE_RETURN_RSRC(array, offset, range)		\
 	if (offset==0) {									\
@@ -87,7 +66,6 @@ static FILE *tsrm_error_file;
 	} else {											\
 		return array[TSRM_UNSHUFFLE_RSRC_ID(offset)];	\
 	}
-#endif
 
 /* Thread local storage */
 static pthread_key_t tls_key;
@@ -276,15 +254,6 @@ TSRM_API void *ts_resource_ex(ts_rsrc_id id, THREAD_T *th_id)
 	int hash_value;
 	tsrm_tls_entry *thread_resources;
 
-#ifdef NETWARE
-	/* The below if loop is added for NetWare to fix an abend while unloading PHP
-	 * when an Apache unload command is issued on the system console.
-	 * While exiting from PHP, at the end for some reason, this function is called
-	 * with tsrm_tls_table = NULL. When this happened, the server abends when
-	 * tsrm_tls_table is accessed since it is NULL.
-	 */
-	if(tsrm_tls_table) {
-#endif
 	if (!th_id) {
 		/* Fast path for looking up the resources for the current
 		 * thread. Its used by just about every call to
@@ -338,9 +307,6 @@ TSRM_API void *ts_resource_ex(ts_rsrc_id id, THREAD_T *th_id)
 	 * changes to the structure as we read it.
 	 */
 	TSRM_SAFE_RETURN_RSRC(thread_resources->storage, id, thread_resources->count);
-#ifdef NETWARE
-	}	/* if(tsrm_tls_table) */
-#endif
 }
 
 /* frees an interpreter context.  You are responsible for making sure that
@@ -544,9 +510,7 @@ TSRM_API MUTEX_T tsrm_mutex_alloc(void)
 	MUTEX_T mutexp;
 	mutexp = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
 	pthread_mutex_init(mutexp,NULL);
-#ifdef THR_DEBUG
 	printf("Mutex created thread: %d\n",mythreadid());
-#endif
 	return( mutexp );
 }
 
@@ -558,9 +522,7 @@ TSRM_API void tsrm_mutex_free(MUTEX_T mutexp)
 		pthread_mutex_destroy(mutexp);
 		free(mutexp);
 	}
-#ifdef THR_DEBUG
 	printf("Mutex freed thread: %d\n",mythreadid());
-#endif
 }
 
 
@@ -619,45 +581,12 @@ TSRM_API void *tsrm_set_new_thread_end_handler(tsrm_thread_end_func_t new_thread
  * Debug support
  */
 
-#if TSRM_DEBUG
-int tsrm_error(int level, const char *format, ...)
-{
-	if (level<=tsrm_error_level) {
-		va_list args;
-		int size;
-
-		fprintf(tsrm_error_file, "TSRM:  ");
-		va_start(args, format);
-		size = vfprintf(tsrm_error_file, format, args);
-		va_end(args);
-		fprintf(tsrm_error_file, "\n");
-		fflush(tsrm_error_file);
-		return size;
-	} else {
-		return 0;
-	}
-}
-#endif
 
 
 void tsrm_error_set(int level, char *debug_filename)
 {
 	tsrm_error_level = level;
 
-#if TSRM_DEBUG
-	if (tsrm_error_file!=stderr) { /* close files opened earlier */
-		fclose(tsrm_error_file);
-	}
-
-	if (debug_filename) {
-		tsrm_error_file = fopen(debug_filename, "w");
-		if (!tsrm_error_file) {
-			tsrm_error_file = stderr;
-		}
-	} else {
-		tsrm_error_file = stderr;
-	}
-#endif
 }
 
 TSRM_API void *tsrm_get_ls_cache(void)
