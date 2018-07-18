@@ -510,7 +510,6 @@ TSRM_API MUTEX_T tsrm_mutex_alloc(void)
 	MUTEX_T mutexp;
 	mutexp = (pthread_mutex_t *)malloc(sizeof(pthread_mutex_t));
 	pthread_mutex_init(mutexp,NULL);
-	printf("Mutex created thread: %d\n",mythreadid());
 	return( mutexp );
 }
 
@@ -522,7 +521,6 @@ TSRM_API void tsrm_mutex_free(MUTEX_T mutexp)
 		pthread_mutex_destroy(mutexp);
 		free(mutexp);
 	}
-	printf("Mutex freed thread: %d\n",mythreadid());
 }
 
 
