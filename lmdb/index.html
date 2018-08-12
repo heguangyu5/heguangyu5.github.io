@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="../prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">lmdb</h1>
+
+<h3>使用流程</h3>
+<pre><code class="language-c">mdb_env_create();
+mdb_env_open();
+mdb_txn_begin();
+mdb_dbi_open();
+mdb_get();
+mdb_put();
+mdb_txn_commit();</code></pre>
+
+<h3>env create, open</h3>
+<pre><code class="language-c">
+struct MDB_env {
+    int me_fd;      // main data file: data.mdb
+    int me_lfd;     // lock file: lock.mdb
+    int me_mfd;     // for writing and syncing the meta pages
+
+    uint32_t me_flags;
+
+    unsigned int me_psize;  // DB page size, inited from me_os_psize
+    unsigned int me_os_psize; // OS page size
+
+    unsigned int me_maxreaders;
+    volatile int me_close_readers;
+
+    MDB_dbi me_numdbs;
+    MDB_dbi me_maxdbs;
+    MDB_PID_T me_pid;
+
+    char *me_path;
+    char *me_map;
+
+    MDB_txninfo *me_txns;
+    MDB_meta *me_metas[2];
+
+    void *me_pbuf;
+
+    MDB_txn *me_txn;
+    MDB_txn *me_txn0;
+
+    size_t me_mapsize;
+    off_t me_size;
+    pgno_t me_maxpg;
+
+    MDB_dbx *me_dbxs;
+    uint16_t *me_db_flags;
+    unsigned int *me_dbiseqs;
+
+    pthread_key_t me_txkey;
+
+    txnid_t me_pgoldest;
+    MDB_pgstate me_pgstate;
+
+    MDB_page *me_dpages;
+    MDB_IDL me_free_pgs;
+    MDB_ID2L me_dirty_list;
+    int me_maxfree_1pg;
+    unsigned int me_nodemax;
+    int me_live_reader;
+    void *me_userctx;
+};
+
+int mdb_env_create(MDB_env **env)
+{
+    e->me_maxreaders = DEFAULT_READERS = 126;
+    e->me_maxdbs     = CORE_DBS = 2;
+    e->me_numdbs     = CORE_DBS = 2;
+    e->me_fd,lfd,mfd = -1;
+    e->me_pid        = getpid();
+    e->me_os_psize   = sysconf(_SC_PAGE_SIZE) = 4096;
+}
+
+int mdb_env_set_mapsize(MDB_env *env, size_t size)
+{
+    env->me_mapsize = size;
+}
+int mdb_env_set_maxreaders(MDB_env *env, unsigned int readers)
+{
+    env->me_maxreaders = readers;
+}
+int mdb_env_set_maxdbs(MDB_env *env, MDB_dbi dbs)
+{
+    env->me_maxdbs = dbs + CORE_DBS;
+}
+
+int mdb_env_open(MDB_env *env, const char *path, unsigned int flags, mdb_mode_t mode)
+{
+    env->me_free_pgs = mdb_midl_alloc(MDB_IDL_UM_MAX = 128K - 1);
+    // mdb_midl_alloc()实际分配了128K+1个MDB_ID(size_t),其实就是个
+    //  size_t arr[128K+1];
+    //  arr[0] = 128K-1;
+    //  arr[1] = 0;
+    //  me_free_pgs = arr + 1;
+
+    env->me_dirty_list = calloc(MDB_IDL_UM_SIZE = 128K, sizeof(MDB_ID2));
+    // MDB_ID2 arr[128K];
+    struct MDB_ID2 {
+        MDB_ID mid;
+        void *mptr;
+    };
+
+    env->me_dbxs = calloc(env->me_maxdbs, sizeof(MDB_dbx));
+    struct MDB_dbx {
+        MDB_val md_name;        // DB name
+        MDB_cmp_func *md_cmp;   // key compare function
+        MDB_cmp_func *md_dcmp;  // data compare function
+        MDB_rel_func *md_rel;
+        void *md_relctx;
+    };
+    env->me_dbflags = calloc(env->me_maxdbs, sizeof(uint16_t));
+    env->me_dbiseqs = calloc(env->me_maxdbs, sizeof(unsigned int));
+
+    env->me_dbxs[FREE_DBI].md_cmp = mdb_cmp_long;
+
+    mdb_env_setup_locks(env, fname, mode, *excl);
+        // 打开lock文件(如果不存在,则创建)
+        pthread_key_create(&env->me_txkey)
+        // 尝试获取写锁,如果失败,尝试获取读锁
+        // lock文件内容是一个MDB_txninfo + readers, MDB_txninfo里已经包含了一个reader
+        // 根据env->me_maxreaders可以计算出期望的lock文件的大小,
+        // 如果lock文件比期望的小,并且获取到了写锁,则增大lock文件的大小,
+        // 否则,根据lock文件的大小计算出正确的maxreaders,修正env->me_maxreaders.
+        env->me_txns = mmap(lock_file)
+        // 如果获取到了写锁,则把me_txns->mti_rmutex/mti_wmutex,magic,format,txnid,numreaders设置好.
+        // 否则校验magic,format看是否有效.
+
+        // 总结下:
+        // lock文件是并发读的核心,如果取得了写锁,则可加大并发读,否则,只能照着lock文件的限制走.
+        // mdb文件map好后,就会将写锁变成读锁,所以实际上很多时间都能成功加大并发读.
+        // (这是指open env,马上又close的情况.如果有一个进程open env,但不close,由于读锁的存在,写锁取得不了.)
+        // lock文件的关键数据字段: rmutex,wmutex,txnid,numreaders,readers.
+        // 也就是第一个调用setup_locks()的进程可以加大并发读.
+
+        struct MDB_txninfo {
+            union {
+                MDB_txbody mtb;
+                #define mti_rmutex mt1.mtb.mtb_rmutex
+                char pad[];
+            } mt1;
+            union {
+                mdb_mutex_t mt2_wmutex;
+                #define mti_wmutex mt2.mt2_wmutex
+                char pad[];
+            } mt2;
+            MDB_reader mti_readers[1];
+        };
+
+        struct MDB_txbody {
+            uint32_t mtb_magic;
+            uint32_t mtb_format;
+            mdb_mutex_t mtb_rmutex;
+            volatile txnid_t mtb_txnid;
+            volatile unsigned mtb_numreaders;
+        };
+
+        struct MDB_reader {
+            union {
+                MDB_rxbody mrx;
+                char pad[];
+            } mru;
+        };
+
+        struct MDB_rxbody {
+            volatile txnid_t mrb_txnid;
+            volatile MDB_PID_T mrb_pid;
+            volatile MDB_THR_T mrb_tid;
+        };
+
+    mdb_env_read_header(env, &meta);
+        // 如果是全新的mdb文件,则返回ENOENT
+        // 否则,检验MDB_page.flags是否是P_META,是的话,magic,version是否有效,然后继续读取下一个meta
+        // 最终,这两个meta的哪个txnid大,哪个做为最终的meta返回
+
+        // 总结下:
+        // mdb文件的开头是如下的一个metabuf,根据metabuf.meta->mm_psize指示,还有第二个meta.
+
+        union MDB_metabuf {
+            MDB_page mb_page;
+            struct {
+                char mm_pad[PAGEHDRSZ];
+                MDB_meta mm_meta;
+            } mb_metabuf;
+        };
+
+        struct MDB_page {
+            union {
+                pgno_t p_pgno;
+                struct MDB_page *p_next;
+            } mp_p;
+
+            uint16_t mp_pad;
+            uint16_t mp_flags;
+
+            union {
+                struct {
+                    indx_t pb_lower;
+                    indx_t pb_upper;
+                } pb;
+                uint32_t pb_pages;
+            } mp_pb;
+
+            indx_t mp_ptrs[1];
+        };
+
+        struct MDB_meta {
+            uint32_t mm_magic;      // 0xBEEFC0DE
+            uint32_t mm_version;
+            void *mm_address;       // address for fixed mapping
+            size_t mm_mapsize;
+#define mm_psize    mm_dbs[FREE_DBI].md_pad
+            MDB_db mm_dbs[CORE_DBS=2]; // 0-FREE DBI 1-MAIN DBI
+            pgno_t mm_last_pg;
+            volatile txnid_t mm_txnid;
+        };
+
+        struct MDB_db {
+            uint32_t md_pad;
+            uint16_t md_flags;
+            uint16_t md_depth;
+            pgno_t md_branch_pages;
+            pgno_t md_leaf_pages;
+            pgno_t md_overflow_pages;
+            size_t md_entries;
+            pgno_t md_root;
+        };
+
+    // 如果不是全新的mdb文件,则meta信息已经从mdb文件的开头读取到了,env->me_psize = meta.mm_psize
+    // 如果是全新的mdb文件,则env->me_psize = env->me_os_psize;然后初始化meta,并给一个默认的mapsize
+    // mapsize是可以通过调用mdb_env_set_mapsize()设置的,不管是默认值,还是meta里记录的,还是手动设置的,都不能小于
+    // 实际mdb文件的大小,最终env->me_mapsize要和meta.mm_mapsize保持一致.
+    // 如果是全新的mdb文件,此时要把meta的信息写入到文件了,写入两份,一个meta占一个page.
+
+    mdb_env_map(env, NULL);
+        // 将mdb文件mmap出来.
+        env->me_map = mmap(env->me_fd);
+        env->me_metas[0] = x;
+        env->me_metas[1] = x;
+    // 到此为止,env->mfd,lfd, me_map,me_metas, me_txns已经ready了.
+
+    env->me_maxfree_1pg = (env->me_psize - PAGEHDRSZ) / sizeof(pgno_t) - 1;
+    // 一个page上最多可以保存多少个pgno_t
+    env->me_nodemax = (((env->me_psize - PAGEHDRSZ) / MDB_MINKEYS) & -2) - sizeof(indx_t);
+    // @see MDB_MINKEYS 注释
+    env->me_maxpg = env->me_mapsize / env->me_psize;
+    // 这个env最多可以有多少个page.
+
+    // 如果之前获取的是写锁,则mdb_env_share_locks(),变成读锁.
+
+    // 如果不是readonly,初始化env->me_txn0(写事务锁).
+    // 包括一个MDB_txn + maxdbs * (MDB_db + MDB_cursor * + unsigned int + 1)
+    // 布局如下:
+    //  | MDB_txn | maxdbs * MDB_db | maxdbs * MDB_cursor * | maxdbs * unsigned int | maxdbs |
+    //     txn       mt_dbs             mt_cursors              mt_dbiseqs              db_flags
+    txn->mt_env  = env;
+    txn->mt_dbxs = env->me_dbxs;
+    env->me_txn0 = txn;
+
+    struct MDB_txn {
+        MDB_txn *mt_parent;
+        MDB_txn *mt_child;
+
+        pgno_t mt_next_pgno;
+        txnid_t mt_txnid;
+        MDB_env *mt_env;
+        MDB_IDL mt_free_pgs;
+        MDB_page *mt_loose_pgs;
+        int mt_loose_count;
+
+        MDB_IDL mt_spill_pgs;
+        union {
+            MDB_ID2L dirty_list;
+            MDB_reader *reader;
+        } mt_u;
+        MDB_dbx *mt_dbxs;
+        MDB_db *mt_dbs;
+        unsigned int *mt_dbiseqs;
+        MDB_cursor **mt_cursors;
+        unsigned char *mt_dbflags;
+        MDB_dbi mt_numdbs;
+
+        unsigned int mt_flags;
+        unsigned int mt_dirty_room;
+    };
+}
+</code></pre>
+
+<h3>mdb_txn_begin()</h3>
+<pre><code class="language-c">
+int mdb_txn_begin(MDB_env *env, MDB_txn *parent, unsigned int flags, MDB_txn **ret)
+{
+    // 读事务
+    // 分配一个txn,如下:
+    // | MDB_txn | maxdbs * MDB_db | maxdbs(db_flags) |
+    txn->mt_dbxs  = env->me_dbxs;
+    txn->mt_flags = flags; // 0 | MDB_RDONLY
+    txn->mt_env   = env;
+    txn->dbiseqs  = env->me_dbiseqs;
+        mdb_txn_renew0(txn);
+            lock rmutex
+            find a reader, set pid, tid
+            unlock rmutex
+            pthread_setspecific(env->me_txkey); // 一个thread一个reader.
+            r->mr_txnid = env->me_txns->mti_txnid;
+            txn->mt_txnid = r->mr_txnid;
+            txn->mt_u.reader = r;
+
+    // 写事务
+        txn = env->me_txn0;
+        mdb_txn_renew0(txn);
+            lock wmutex
+            txn->mt_txnid = env->me_txns->mti_txnid;
+            txn->mt_txnid++;
+            txn->mt_loose_pgs = NULL;
+            txn->mt_loose_count = 0;
+
+            txn->mt_dirty_room = MDB_IDL_UM_MAX = 128K - 1;
+            txn->mt_u.dirty_list = env->me_dirty_list;
+            txn->mt_u.dirty_list[0].mid = 0;
+            // dirty_list[0] = {mid:0,mptr:nouse}
+            // dirty_room记录着还能记多少个dirty page, dirty_list[0].mid记录着有多少个dirty_page
+
+            txn->mt_free_pgs = env->me_free_pgs;
+            txn->mt_free_pgs[0] = 0;
+
+            txn->mt_spill_pgs = NULL;
+            env->me_txn = txn;
+            txn->mt_dbiseqs == env->me_dbiseqs;
+
+    txn->mt_dbs == meta->mm_dbs
+    txn->mt_next_pgno = meta->mm_last_pg + 1;
+    // 一个全新的mdb文件,在init_meta时,mm_last_pg=NUM_METAS-1=1;也就是最后使用的page no是1.
+    // pgno=0,pgno=1保存着两个meta.
+}
+</code></pre>
+
+<h3>mdb_dbi_open()</h3>
+<pre><code class="language-c">
+int mdb_dbi_open(MDB_txn *txn, const char *name, unsigned int flags, MDB_dbi *dbi)
+{
+    *dbi = MAIN_DBI;
+    mdb_default_cmp(txn, MAIN_DBI);
+        txn->mt_dbxs[MAIN_DBI].md_cmp = xxx;
+        txn->mt_dbxs[MAIN_DBI].md_dcmp = xxx;
+}
+</code></pre>
+
+<h3>mdb_cursor_get()</h3>
+<pre><code class="language-c">
+// page flags
+#define P_BRANCH     0x01       /**< branch page */
+#define P_LEAF       0x02       /**< leaf page */
+#define P_OVERFLOW   0x04       /**< overflow page */
+#define P_META       0x08       /**< meta page */
+#define P_DIRTY      0x10       /**< dirty page, also set for #P_SUBP pages */
+#define P_LEAF2      0x20       /**< for #MDB_DUPFIXED records */
+#define P_SUBP       0x40       /**< for #MDB_DUPSORT sub-pages */
+#define P_LOOSE      0x4000     /**< page was dirtied then freed, can be reused */
+#define P_KEEP       0x8000     /**< leave this page alone during spill */
+
+// MDB_DUPSORT, MDB_DUPFIXED我们先不考虑,所以代码时遇到IS_LEAF2(p) IS_SUBP(p)时全可以跳过
+#define IS_LEAF2(p)  F_ISSET((p)->mp_flags, P_LEAF2)
+#define IS_SUBP(p)   F_ISSET((p)->mp_flags, P_SUBP)
+
+// 找到db里的第一个key
+mdb_cursor_get(mc, key, data, MDB_FIRST);
+    mdb_cursor_first(mc, key, data);
+        mdb_page_search(mc, NULL, MDB_PS_FIRST);
+            // mdb_page_search肯定是从root page开始的
+            mdb_page_search_root(mc, key = NULL, flags = MDB_PS_FIRST);
+                // ok,终于搞明白mc->mc_snum,mc_top,mc_pg,mc_ki是怎么回事了.
+                // MDB_page *mc_pg[CURSOR_STACK = 32]这个数组是一个stack,
+                // mc_top记录着栈顶index,mc_snum记录着当前mc_pg里已经push了多少个page,
+                // mc_ki记录着page.mp_ptrs[]的index. short for key_index
+                while (IS_BRANCH(mp)) {
+                    node = mp + mp->mp_ptrs[0];
+                    mdb_page_get(mc, NODEPGNO(node), &mp, NULL);
+                    mc->mc_ki[mc->mc_top] = i;
+                    mdb_cusrsor_push(mc, mp);
+                } // 一直找到leaf page
+                mc->mc_flags |= C_INITIALIZED;
+        MDB_page *leaf_page = mc->mc_pg[mc->mc_top];
+        MDB_node *leaf = leaf_page + leaf_page->mp_ptrs[0];
+        mdb_node_read(mc, leaf, data);
+            // 如果是小数据的node,key,data都保存在当前page里
+            data->mv_size = leaf->mn_lo | (leaf->mn_hi << 16);
+            data->mv_data = leaf->mn_data + leaf->mn_ksize;
+            // 如果是大数据的node,key,data保存不到一个page里(overflow)
+            data->mv_size = leaf->mn_lo | (leaf->mn_hi << 16);
+            // 原来保存mv_data的地方,保存着一个pgno,这个pgno向后的mv_size大小,保存着数据.
+            pgno = (pgno_t *)(leaf->mn_data + leaf->mn_ksize)[0];
+            mdb_page_get(mc, pgno, &omp, NULL);
+            data->mv_data = omp + PAGEHDRSZ;
+        MDB_GET_KEY(leaf, key);
+            key->mv_size = leaf->mn_ksize;
+            key->mv_data = leaf->mn_data;
+// 找到db里的最后一个key
+mdb_cursor_get(mc, key, data, MDB_LAST);
+    mdb_cursor_last(mc, key, data);
+        mdb_page_search(mc, NULL, MDB_PS_LAST);
+            mdb_page_search_root(mc, key = NULL, flags = MDB_PS_LAST);
+                while (IS_BRANCH(mp)) {
+                    i = NUMKEYS[mp] - 1;
+                    node = mp + mp->mp_ptrs[i];
+                    mdb_page_get(mc, NODEPGNO(node), &mp, NULL);
+                    // 从NODEPGNO可以算出lmdb支持的最大mdb文件大小,在mdb.c#0450
+                    // typedef MDB_ID pgno_t;
+                    // 的注释里也有说明.
+                    // MDB_ID其实就是size_t,在64位机器上,size_t是64位的,也就是说pgno理论上支持64位最大值.
+                    // 再加上一个page本身就已经是4K了,所以这个最大值是Math.pow(2,64)*4K
+                    // 实际上操作系统也不支持这么大的mmap,所以lmdb只用了size_t的48位,所以理论上mdb文件的最大值
+                    // 是Math.pow(2,48)*4K.
+                    // 这48位的低16位保存在node->mn_lo里,中16位保存在node->mn_hi里,
+                    // 高16位保存在node->mn_flags里.mn_flags只在leaf page上有用,所以这样保存是没问题的.
+                    mc->mc_ki[mc->mc_top] = i;
+                    mdb_cursor_push(mc, mp);
+                }
+                mc->mc_flags |= C_INITIALIZED;
+        MDB_page *leaf_page = mc->mc_pg[mc->mc_top];
+        MDB_node *leaf = leaf_page + leaf_page->mp_ptrs[mc->mc_ki[mc->mc_top]];
+        mdb_node_read(mc, leaf_page, data);
+        MDB_GET_KEY(leaf, key);
+// 找到指定key
+mdb_cursor_get(mc, key, data, MDB_SET);
+    mdb_cursor_set(mc, key, data, MDB_SET, &exact);
+        mc->mc_pg[0] = NULL;
+        mdb_page_search(mc, key, 0);
+            mdb_page_search_root(mc, key, 0);
+                while (IS_BRANCH(mp)) {
+                    node = mdb_node_search(mc, key, &exact);
+                    // mdb_node_search()时可以知道,branch page里,node->lo,hi,flags保存的是pgno,
+                    // ksize,data里保存的是key.并且是key是顺序排列的.
+                    // mdb_node_search()通过二分查找去找key,如果找到key,exact=1并返回node.
+                    // 如果没找到key,并且key比这个page里最大的key都大,则返回null,否则返回node.
+                    // 也就是说,mdb_node_search()返回的node要么等于key,要么比key大.
+                    // 如果没有比key大的,返回null.
+                    if (node == NULL) {
+                        i = NUMKEYS(mp) - 1; // 向下一层级右侧找
+                    } else {
+                        i = mc->mc_ki[mc->mc_top];
+                        if (!exact) {
+                            i--; // 向下一层级左侧找
+                        }
+                    }
+                }
+                // 直到找到leaf page
+        mp = mc->mc_pg[mc->mc_top];
+        MDB_node *leaf = mdb_node_search(mc, key, exactp);
+        if (!*exactp) {
+            return MDB_NOTFOUND;
+        }
+        mc->mc_flags |= C_INITIALIZED;
+        mdb_node_read(mc, leaf, data);
+// 找到指定key的下一个key
+mdb_cursor_get(mc, key, data, MDB_NEXT);
+    mdb_cursor_next(mc, key, data, MDB_NEXT);
+        if (!(mc->mc_flags & C_INITIALIZED)) {
+            return mdb_cursor_first(mc, key, data);
+        }
+        mp = mc->mc_pg[mc->mc_top];
+        // 主要看mc->mc_ki[mc->mc_top]和当前leaf page的NUMKEYS()的大小
+        // 如果key index没到最大,则mc->mc_ki[mc->mc_top]++定位到下一个node,并返回即可.
+        // 如果到了最大,就要看sibling page了.如果没有sibling page,mc->mc_flags设上C_EOP标记,表示后边没有了.
+        mdb_cursor_sibling(mc, 1);
+            mdb_cursor_pop(mc);
+            // 如果上一层里的key index也是最后一个,就再上一层,一直到key index不是最后一个.
+            // 找准层级后,把key index++.
+            // 找出来这个key index对应的node,再从node里找到pgno,然后get到这个page,mdb_cursor_push(mc, mp);
+        mp = mc->mc_pg[mc->mc_top];
+        // 然后取到node,返回即可.
+// 找到指定key的前一个key
+mdb_cursor_get(mc, key, data, MDB_PREV);
+    mdb_cursor_prev(mc, key, data, MDB_PREV);
+        if (!(mc->mc_flags & C_INITIALIZED)) {
+            return mdb_cursor_last(mc, key, data);
+        }
+        mp = mc->mc_pg[mc->mc_top];
+        // 同样是看mc->mc_ki[mc->mc_top],不过这次是看其值是否为0.
+        // 如果为0,mdb_cursor_sibling(mc, 0)切换到左侧page上去,否则key index--;
+</code></pre>
+
+<h3>mdb_get()</h3>
+<pre><code class="language-c">
+int mdb_get(MDB_txn *txn, MDB_dbi dbi, MDB_val *key, MDB_val *data)
+{
+    struct MDB_val {
+        size_t  mv_size;
+        void    *mv_data;
+    };
+    struct MDB_cursor {
+        MDB_cursor *mc_next;
+        MDB_cursor *mc_backup;
+        struct MDB_xcursor *mc_xcursor;
+        MDB_txn *mc_txn;
+        MDB_dbi mc_dbi;
+        MDB_db *mc_db;
+        MDB_dbx *mc_dbx;
+        unsigned char *mc_dbflag;
+        unsigned short mc_snum; // mc_pg里有多少个page
+        unsigned short mc_top;  // mc_pg的stack的top
+        unsigned int mc_flags;
+        MDB_page *mc_pg[CURSOR_STACK = 32];
+        indx_t mc_ki[CURSOR_STACK = 32];
+    };
+    struct MDB_xcursor {
+        MDB_cursor mx_cursor;
+        MDB_db mx_db;
+        MDB_dbx mx_dbx;
+        unsigned char mx_dbflag;
+    };
+
+    MDB_cursor mc;
+    MDB_xcursor mx;
+    int exact = 0;
+    mdb_cursor_init(&mc, txn, dbi, &mx);
+        mc->dbi = dbi;
+        mc->txt = txn;
+        mc->db  = &txn->mt_dbs[dbi];
+        mc->dbx = &txn->mt_dbxs[dbi];
+        mc->dbflag = &txn->mt_dbflags[dbi];
+        mc->mc_xcursor = NULL;
+    return mdb_cursor_set(&mc, key, data, MDB_SET, &exact);
+}
+</code></pre>
+
+<h3>mdb_put()</h3>
+<pre><code class="language-c">
+int mdb_put(MDB_txn *txn, MDB_dbi dbi, MDB_val *key, MDB_val *data, unsigned int flags)
+{
+    MDB_cursor mc;
+    MDB_xcursor mx;
+
+    mdb_cursor_init(&mc, txn, dbi, &mx);
+    mdb_cursor_put(&mc, key, data, flags);
+        // 分两种情况:
+        // 全新的mdb文件,还没有数据
+        mc->mc_db->md_root == P_INVALID
+            mc->mc_snum = 0;
+            mc->mc_top = 0;
+            rc = MDB_NO_ROOT;
+            mdb_page_new(mc, P_LEAF, 1, &np);
+            mdb_cursor_push(mc, np);
+            mc->mc_db->md_root = np->mp_pgno;
+            mc->mc_db->md_depth++;
+            mc->mc_dbflag |= DB_DIRTY;
+            mc->mc_flags |= C_INITIALIZED;
+        // 已有数据的mdb文件
+        mdb_cursor_set(mc, key, &d2, MDB_SET, &exact);
+        rc = MDB_NOTFOUND;
+        mdb_cursor_touch(mc);
+            // mc->mc_pg[]里的page从0开始栈顶
+            mdb_page_touch(mc);
+                mdb_page_alloc(mc, 1, &np);
+                if (mc->mc_top) {
+                    set parent node pgno to this new page
+                } else {
+                    mc->mc_db->md_root = pgno;
+                }
+                mdb_page_copy(np, mp, env->me_psize);
+                np->mp_pgno = pgno;
+                np->mp_flags |= P_DIRTY;
+
+        nsize = mdb_leaf_size(env, key, data);
+            // 如果data size太大,数据保存到overflow page上.
+            // nsize的值始终是将要保存的MDB_node所需要的大小,正常情况下是:
+            // MDB_node + key + data
+            // overflow时是:
+            // MDB_node + key + pgno
+        if (SIZELEFT(mp) < nsize) {
+            mdb_page_split(mc, key, rdata, P_INVALID, nflags);
+                // create a right sibling
+                mdb_page_new(mc, mp->mp_flags, 1, &rp);
+                if (mc->mc_top < 1) {
+                    mdb_page_new(mc, P_BRANCH, 1, &pp);
+                    mc->mc_pg[0] = pp;
+                    mc->mc_ki[0] = 0;
+                    mc->mc_db->md_root = pp->mp_pgno;
+                    mc->mc_db->md_depth++;
+                    mdb_node_add(mc, 0, NULL, NULL, mp->mp_pgno, 0);
+                } else {
+                    ptop = mc->mc_top - 1;
+                }
+        } else {
+            mdb_node_add(mc, mc->mc_ki[mc->mc_top], key, rdata, 0, nflags);
+                // overflow
+                mdb_page_new(mc, P_OVERFLOW, ovpages, &ofp);
+                flags |= F_BIGDATA;
+                // 将比当前key大的key后移,好插入node offset
+                for (i = NUMKEYS(mp); i > indx; i--) {
+                    mp->mp_ptrs[i] = mp->mp_ptrs[i-1];
+                }
+                ofs = mp->mp_upper - node_size;
+                mp->mp_ptrs[indx] = ofs;
+                mp->mp_upper = ofs;
+                mp->mp_lower += sizeof(index_t);
+                // write data
+                node = mp + mp->mp_ptrs[indx];
+                node->mn_ksize = key->mv_size;
+                node->mn_flags = flags;
+                node->mn_lo,mn_hi = data->mv_size;
+                memcpy(key);
+                memcpy(data);
+                // overflow
+                memcpy(ofp->mp_pgno);
+                memcpy(data);
+        }
+        mc->mc_db->md_entries++;
+        mc->mc_flags |= C_INITIALIZED;
+
+        struct MDB_node {
+            unsigned short mn_lo, mn_hi;
+            unsigned short mn_flags;
+            unsigned short mn_ksize;
+            char mn_data[1];
+        };
+        // ok,mdb的leaf page上小数据怎么存储的终于搞明白了
+        // 一个page的开头是struct MDB_page,然后是一个indx_t的数组,
+        // 这个数组记录着当前page里保存的node的offset,那怎么知道这个数组的大小呢?
+        // 也就是这个page上有多少个node呢?
+        // page的空间利用是从后向前的,MDB_page.mp_lower记着struct MDB_page + indx_t数组的位置,
+        // MDB_page.mp_upper记着数据从后向前用到哪里了.
+        // (lower - PAGEHDRSZ) / 2 就是indx_t数组的大小了. indx_t其实是uint16_t,占两个字节
+        // node->mn_ksize记录着key的大小,node->mn_lo,mn_hi记录着data的大小
+        // | MDB_page header | indx_t arr[] | free space | node1 header key data | node2 header key data |
+        //                                lower         upper
+}
+</cod></pre>
+
+
+
+<h3>mdb_cursor_set()</h3>
+<pre><code class="language-c">
+mdb_cursor_set();
+</code></pre>
+
+</div>
+<script src="../prism.js"></script>
+</body>
+</html>
