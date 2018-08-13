@@ -12,6 +12,39 @@
 
 <h1 class="page-header">lmdb</h1>
 
+<h3>总结</h3>
+<pre><code class="language-c">
+文件结构:
+1. 所有数据都保存在一个mdb文件里.
+2. mdb文件拆分成一个个page,并编号.
+3. 前2个page记录数据库自身的一些信息,称为meta page.
+4. 其余的page构成一个b+tree.这些page分三种: branch page, leaf page, overflow page.
+5. b-tree的非叶子节点(branch page),保存着key和下一层的pgno;叶子节点(leaf page)保存着key和data.
+   如果key和data足够小,那就直接保存在leaf page里,否则,另外分配足够多的overflow page来保存data,
+   leaf page里只保存key和data的起始pgno.
+
+问题:
+1. 怎么保证多进程/多线程操作这个mdb文件而不出错?
+   file lock,限制同一时间只能有一个进程/线程写文件.
+2. 写的同时还能读,怎么做到的?
+   copy on write,写时先copy一份,再做修改.
+3. 被copy on write的页面怎么处理?
+   记录下来一次操作过程中所有被copy on write的pgno和本次操作的事务id.
+   每个读事务在读取开始时记下当时的事务id,这样所有读事务用到的最小事务id就能确定下来.
+   当copy on write需要新的page时,看看有没有小于最小事务id的记录.如果有,不再分配新的page,而直接用原来的page.
+4. key的最大长度是多少?
+   要维持一个b-tree结构,一个page上最少要有2个key. lmdb出于兼容考虑,限制key最长511个字节.
+5. data的最大长度是多少?
+   记录data长度的字段是32位,所以data的最大长度是4G.
+6. mdb文件最大是多少?或者说mapsize最大是多少?
+   branch page里记录pgno的字段是48位,所以理论上mdb文件最大可以是1EB=1024PB=1048576TB=Math.pow(2,48)*4K.
+   但实际上现在的cpu硬件也支持不了这么大的address space.
+
+关于备份:
+1. lmdb不能增量备份.
+2. 可以通过mdb_env_copy()做全量备份.
+</code></pre>
+
 <h3>使用流程</h3>
 <pre><code class="language-c">mdb_env_create();
 mdb_env_open();
@@ -638,11 +671,34 @@ int mdb_put(MDB_txn *txn, MDB_dbi dbi, MDB_val *key, MDB_val *data, unsigned int
 }
 </cod></pre>
 
-
-
-<h3>mdb_cursor_set()</h3>
+<h3>mdb_txn_commit()</h3>
 <pre><code class="language-c">
-mdb_cursor_set();
+int mdb_txn_commit(MDB_txn *txn)
+{
+    // readonly
+    mdb_txn_end(txn, MDB_END_EMPTY_COMMIT|MDB_END_UPDATE|MDB_END_SLOT|MDB_END_FREE);
+        txn->mt_u.reader->mr_txnid = (txnid_t)-1;
+        txn->mt_u.reader = NULL;
+        free(txn);
+    // write
+    mdb_freelist_save(txn);
+    mdb_page_flush(txn, 0);
+        txn->mt_u.dirty_list
+        txn->mt_dirty_room
+    mdb_env_sync(env, 0);
+        msync();
+    mdb_env_write_meta(txn);
+        mp = env->me_metas[x];
+        mp->mm_dbs[FREE_DBI] = txn->mt_dbs[FREE_DBI];
+        mp->mm_dbs[MAIN_DBI] = txn->mt_dbs[MAIN_DBI];
+        mp->mm_last_pg = txn->mt_next_pgno - 1;
+        mp->mm_txnid = txn->mt_txnid;
+        msync();
+        env->me_txns->mti_txnid = txn->mt_txnid;
+    mdb_txn_end(txn, MDB_END_EMPTY_COMMIT|MDB_END_UPDATE|MDB_END_SLOT|MDB_END_FREE|MDB_END_COMMITTED|MDB_END_UPDATE);
+        unlock wmutex
+        free(txn);
+}
 </code></pre>
 
 </div>
