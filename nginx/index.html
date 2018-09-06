@@ -12,8 +12,74 @@
 
 <h1 class="page-header">nginx 1.1.19</h1>
 
-<h3>modules</h3>
-<pre><code class="language-c">// configure产生的#define在 objs 目录里
+<h3>configure</h3>
+<pre><code class="language-c">
+./configure --help
+
+# add all --without options except --without-http
+./configure --prefix=/home/heguangyu5/nginx-1.10.3 \
+            --without-select_module \
+            --without-poll_module \
+            --without-http_charset_module \
+            --without-http_gzip_module \
+            --without-http_ssi_module \
+            --without-http_userid_module \
+            --without-http_access_module \
+            --without-http_auth_basic_module \
+            --without-http_autoindex_module \
+            --without-http_geo_module \
+            --without-http_map_module \
+            --without-http_split_clients_module \
+            --without-http_referer_module \
+            --without-http_rewrite_module \
+            --without-http_proxy_module \
+            --without-http_fastcgi_module \
+            --without-http_uwsgi_module \
+            --without-http_scgi_module \
+            --without-http_memcached_module \
+            --without-http_limit_conn_module \
+            --without-http_limit_req_module \
+            --without-http_empty_gif_module \
+            --without-http_browser_module \
+            --without-http_upstream_hash_module \
+            --without-http_upstream_ip_hash_module \
+            --without-http_upstream_least_conn_module \
+            --without-http_upstream_keepalive_module \
+            --without-http_upstream_zone_module \
+            --without-http-cache \
+            --without-mail_pop3_module \
+            --without-mail_imap_module \
+            --without-mail_smtp_module \
+            --without-stream_limit_conn_module \
+            --without-stream_access_module \
+            --without-stream_upstream_hash_module \
+            --without-stream_upstream_least_conn_module \
+            --without-stream_upstream_zone_module \
+            --without-pcre
+
+# objs/src/ngx_modules.c
+
+extern ngx_module_t  ngx_core_module;
+extern ngx_module_t  ngx_errlog_module;
+extern ngx_module_t  ngx_conf_module;
+extern ngx_module_t  ngx_events_module;
+extern ngx_module_t  ngx_event_core_module;
+extern ngx_module_t  ngx_epoll_module;
+extern ngx_module_t  ngx_http_module;
+extern ngx_module_t  ngx_http_core_module;
+extern ngx_module_t  ngx_http_log_module;
+extern ngx_module_t  ngx_http_upstream_module;
+extern ngx_module_t  ngx_http_static_module;
+extern ngx_module_t  ngx_http_index_module;
+extern ngx_module_t  ngx_http_write_filter_module;
+extern ngx_module_t  ngx_http_header_filter_module;
+extern ngx_module_t  ngx_http_chunked_filter_module;
+extern ngx_module_t  ngx_http_range_header_filter_module;
+extern ngx_module_t  ngx_http_headers_filter_module;
+extern ngx_module_t  ngx_http_copy_filter_module;
+extern ngx_module_t  ngx_http_range_body_filter_module;
+extern ngx_module_t  ngx_http_not_modified_filter_module;
+
 ngx_module_t *ngx_modules[] = {
     &ngx_core_module,
     &ngx_errlog_module,
@@ -21,10 +87,44 @@ ngx_module_t *ngx_modules[] = {
     &ngx_events_module,
     &ngx_event_core_module,
     &ngx_epoll_module,
-    &ngx_regex_module,
     &ngx_http_module,
     &ngx_http_core_module,
-    // ...
+    &ngx_http_log_module,
+    &ngx_http_upstream_module,
+    &ngx_http_static_module,
+    &ngx_http_index_module,
+    &ngx_http_write_filter_module,
+    &ngx_http_header_filter_module,
+    &ngx_http_chunked_filter_module,
+    &ngx_http_range_header_filter_module,
+    &ngx_http_headers_filter_module,
+    &ngx_http_copy_filter_module,
+    &ngx_http_range_body_filter_module,
+    &ngx_http_not_modified_filter_module,
+    NULL
+};
+
+char *ngx_module_names[] = {
+    "ngx_core_module",
+    "ngx_errlog_module",
+    "ngx_conf_module",
+    "ngx_events_module",
+    "ngx_event_core_module",
+    "ngx_epoll_module",
+    "ngx_http_module",
+    "ngx_http_core_module",
+    "ngx_http_log_module",
+    "ngx_http_upstream_module",
+    "ngx_http_static_module",
+    "ngx_http_index_module",
+    "ngx_http_write_filter_module",
+    "ngx_http_header_filter_module",
+    "ngx_http_chunked_filter_module",
+    "ngx_http_range_header_filter_module",
+    "ngx_http_headers_filter_module",
+    "ngx_http_copy_filter_module",
+    "ngx_http_range_body_filter_module",
+    "ngx_http_not_modified_filter_module",
     NULL
 };
 
@@ -32,105 +132,43 @@ typedef struct ngx_module_s {
     ngx_uint_t ctx_index;
     ngx_uint_t index;
 
+    char *name;
+
+    ngx_uint_t spare0;
+    ngx_uint_t spare1;
+
     ngx_uint_t version;
+    const char *signature;
 
     void *ctx;
     ngx_command_t *commands;
     ngx_uint_t type;
 
     ngx_int_t (*init_master)(ngx_log_t *log);
+
     ngx_int_t (*init_module)(ngx_cycle_t *cycle);
+
     ngx_int_t (*init_process)(ngx_cycle_t *cycle);
     ngx_int_t (*init_thread)(ngx_cycle_t *cycle);
     void (*exit_thread)(ngx_cycle_t *cycle);
     void (*exit_process)(ngx_cycle_t *cycle);
+
     void (*exit_master)(ngx_cycle_t *cycle);
+
+    uintptr_t spare_hook0;
+    uintptr_t spare_hook1;
+    uintptr_t spare_hook2;
+    uintptr_t spare_hook3;
+    uintptr_t spare_hook4;
+    uintptr_t spare_hook5;
+    uintptr_t spare_hook6;
+    uintptr_t spare_hook7;
 } ngx_module_t;
 
-// ==== CORE MODULES ====
-ngx_core_module = {
-    &ngx_core_module_ctx,                  /* module context */
-    ngx_core_commands,                     /* module directives */
-};
-ngx_errlog_module = {
-    &ngx_errlog_module_ctx,                /* module context */
-    ngx_errlog_commands,                   /* module directives */
-};
-ngx_events_module = {
-    &ngx_events_module_ctx,                /* module context */
-    ngx_events_commands,                   /* module directives */
-};
-ngx_regex_module = {
-    &ngx_regex_module_ctx,                 /* module context */
-    ngx_regex_commands,                    /* module directives */
-    ngx_regex_module_init,                 /* init module */
-};
-ngx_http_module = {
-    &ngx_http_module_ctx,                  /* module context */
-    ngx_http_commands,                     /* module directives */
-};
-// ==== OTHER MODULES ====
-ngx_conf_module = {
-    ngx_conf_commands,                     /* module directives */
-    NGX_CONF_MODULE,                       /* module type */
-    ngx_conf_flush_files,                  /* exit process */
-};
-ngx_event_core_module = {
-    &ngx_event_core_module_ctx,            /* module context */
-    ngx_event_core_commands,               /* module directives */
-    NGX_EVENT_MODULE,                      /* module type */
-    ngx_event_module_init,                 /* init module */
-    ngx_event_process_init,                /* init process */
-};
-ngx_epoll_module = {
-    &ngx_epoll_module_ctx,               /* module context */
-    ngx_epoll_commands,                  /* module directives */
-    NGX_EVENT_MODULE,                    /* module type */
-};
-ngx_module_t  ngx_http_core_module = {
-    &ngx_http_core_module_ctx,             /* module context */
-    ngx_http_core_commands,                /* module directives */
-    NGX_HTTP_MODULE,                       /* module type */
-};
-// ngx_cycle
-struct ngx_cycle_s {
-    void ****conf_ctx;
-    ngx_pool_t *pool;
-
-    ngx_log_t *log;
-    ngx_log_t new_log;
-
-    ngx_connection_t **files;
-    ngx_connection_t  *free_connections;
-    ngx_uint_t         free_connection_n;
-
-    ngx_queue_t reusable_connections_queue;
-
-    ngx_array_t listening;
-    ngx_array_t pathes;
-    ngx_list_t  open_files;
-    ngx_list_t  shared_memory;
-
-    ngx_uint_t  connection_n;
-    ngx_uint_t  files_n;
-
-    ngx_connection_t *connections;
-    ngx_event_t *read_events;
-    ngx_event_t write_events;
-
-    ngx_cycle_t *old_cycle;
-
-    ngx_str_t conf_file;            // => /path/to/nginx/conf/nginx.conf
-    ngx_str_t conf_param;           // => -g 参数
-    ngx_str_t conf_prefix;          // => /path/to/nginx/conf/
-    ngx_str_t prefix;               // => /path/to/nginx/
-    ngx_str_t lock_file;
-    ngx_str_t hostname;
-};
 </code></pre>
 
 <h3>main()</h3>
-<pre><code class="language-c">// http://localhost/lxr/source/src/core/nginx.c?v=nginx-1.1.19#0200
+<pre><code class="language-c">// http://localhost/lxr/source/src/core/nginx.c?v=nginx-1.10.3#0187
 ngx_strerror_init();
     // 初始化ngx_sys_errlist, NGX_SYS_NERR = 135
     // 注释里说的很清楚为什么要有ngx_sys_errlist
@@ -141,22 +179,41 @@ ngx_get_options();
     // -s => ngx_signal, ngx_process = NGX_PROCESS_SIGNALLER
 
 ngx_time_init();
-ngx_regex_init();
+
+// 这里涉及一个C语言的用法,如果没有define过NGX_PCRE,if就是false
+// 前边我们configure时有参数--without-pcre,所以就没有define NGX_PCRE,这里就直接跳过了
+#if (NGX_PCRE)
+    ngx_regex_init();
+#endif
 
 ngx_pid = getpid();
 
 ngx_log_init(ngx_prefix);
-    ngx_log.file = &ngx_log_file = {.fd = open(NGX_PREFIX . "logs/error.log")};
     ngx_log.log_level = NGX_LOG_NOTICE;
+    ngx_log.file      = &ngx_log_file = {
+        .fd = open(NGX_PREFIX . NGX_ERROR_LOG_PATH, NGX_FILE_APPEND, NGX_FILE_CREATE_OR_OPEN)
+    };
 
+ngx_memzero(&init_cycle, sizeof(ngx_cycle_t));
 init_cycle.log = &ngx_log;
 ngx_cycle = &init_cycle;
-init_cycle.pool = ngx_create_pool();
-ngx_save_argv(); // 把argv复制一份到ngx_argv
+init_cycle.pool = ngx_create_pool(1024, &ngx_log);
+
+ngx_save_argv(cycle, argc, argv);
+    ngx_os_argv = (char **)argv;
+    ngx_argc    = argc;
+    ngx_argv    = ngx_alloc((argc + 1) * sizeof(char *)); // copy argv to ngx_argv
+    ngx_argv[i] = NULL;
+    ngx_os_environ = environ;
+
 ngx_process_options();
-    init_cycle.conf_prefix = NGX_CONF_PREFIX = "conf/" => "/path/to/nginx/conf/";
-    init_cycle.prefix      = NGX_PREFIX      = "/path/to/nginx/"
-    init_cycle.conf_file   = NGX_CONF_PATH   = "conf/nginx.conf" => "/path/to/nginx/conf/nginx.conf";
+    init_cycle.conf_prefix = NGX_CONF_PREFIX = "conf/";
+    init_cycle.prefix      = NGX_PREFIX      = "/home/heguangyu5/nginx-1.10.3/";
+    init_cycle.conf_file   = NGX_CONF_PATH   = "conf/nginx.conf";
+    ngx_conf_full_name(cycle, &cycle->conf_file, 0);
+        ngx_get_full_name(cycle->pool, cycle->prefix, cycle->conf_file);
+            // 最终 cycle->conf_file = "/home/heguangyu5/nginx-1.10.3/conf/nginx.conf"
+
 ngx_os_init();
     ngx_os_specific_init(); // 调用uname()取得ostype,osrelease, ngx_os_io = ngx_linux_io;
     ngx_init_setproctitle(); // 把environ复制一份,上边已经把argv复制了一份,现在可以放心的修改os的argv,env了
@@ -164,125 +221,265 @@ ngx_os_init();
     ngx_cpuinfo(); // 调用cpuid取得cacheline_size
     ngx_max_sockets = rlim_cur;
     ngx_inherited_nonblocking = 1;
+
 ngx_crc32_table_init();
 ngx_add_inherited_sockets();
-// 给每个module设上index,同时也得到了module的数量 ngx_max_module
-ngx_init_cycle(&init_cycle);
-    /* 新创建一个cycle
-       需要注意的是,虽然上边的init_cycle在没有传递-g参数的情况下,conf_param.len = 0, conf_param.data = NULL
-       但是这里将init_cycle复制到新的cycle上时,conf_param又给分配了一小块内存,也就是说新的len = 0,data !=NULL 了
-       初始化 pathes, open_files, shared_memory, listening, reusable_connections_queue, conf_ctx
-       cycle->hostname = gethostname()
-       遍历NGX_CORE_MODULE(core,errlog,events,regex,http),如果module->ctx实现了create_conf方法,则调用之
-            core:   ngx_core_module_create_conf() => 分配一块内存用于ngx_core_conf_t{daemon,master,user,group...}
-            errlog: 没有create_conf()方法
-            events: 没有create_conf()方法
-            regex:  ngx_regex_create_conf() => 分配一块内存用于ngx_regex_conf_t{pcre_jit}
-            http:   没有create_conf()方法
 
-        前边初始化的cycle->conf_ctx是个指针数组,每个module占一个位置,这里core和regex create的conf都存到conf_ctx里了
+ngx_preinit_modules();
+    // 给每个module设上index和name,同时也得到了module的数量 ngx_modules_n
+    // 和 ngx_max_module = ngx_modules_n + NGX_MAX_DYNAMIC_MODULES(128);
 
-        如果传递了参数-g的话,ngx_conf_param()将会处理它,先略过
-        ngx_conf_parse()来处理 /path/to/nginx/conf/nginx.conf, 只处理 NGX_CORE_MODULE和NGX_CONF_MODULE 的 NGX_MAIN_CONF
-        nginx的配置文件只有两种情况: 
-            1) 以;号结尾的一行配置
-            2) 用{}包起来的block,block里是以;结尾的配置项
-        默认配置项使用ngx_conf_handler()来处理,也可以改用其它方法. 每个配置项都有对应的一个函数来处理.
-        nginx的默认配置如下:
-            worker_processes 1; // ngx_core_commands -> ngx_conf_set_num_slot()
-                                // ngx_core_conf_t.worker_processes = 1;
-            events {            // ngx_events_commands -> ngx_events_block()
-                                //    ngx_events_block()遍历ngx_modules,找到NGX_EVENT_MODULE(event_core, epoll)
-                                //    调用其ctx的create_conf()方法
-                                //      event_core: ngx_event_create_conf() 分配一块内存用于ngx_event_conf_t {connections,use,multi_accept,accept_mutex...}
-                                //      epoll: ngx_epoll_create_conf() 分配一块内存用于ngx_epoll_conf_t {events,aio_requests}
-                                //    接着调用ngx_conf_parse()解析block块
-                worker_connections 1024;  // ngx_event_conf_t.connections = 1024;
-                                          // cycle->connection_n = 1024;
-                                //    再然后再次遍历ngx_modules,找到NGX_EVENT_MODULE,调用其init_conf()方法
-                                //      event_core: ngx_event_init_conf()
-                                //                  ngx_event_conf_t.use = epoll->ctx_index
-                                //                                  .name = "epoll"
-                                //                                  .multi_accept = 0
-                                //                                  .accept_mutex = 1
-                                //                                  .accept_mutex_delay = 500
-                                //      epoll: ngx_epoll_init_conf()
-                                //             ngx_epoll_conf_t.events = 512
-                                //                             .aio_requests = 32
-            }
-            http {              // ngx_http_commands -> ngx_http_block()
-                                //    和ngx_events_block()很相似,首先,找出来NGX_HTTP_MODULE,然后分别调用其ctx的create_main_conf,create_srv_conf,create_loc_conf方法
-                                //    http_core:
-                                //      ngx_http_core_main_conf_t {servers,headers_in_hash,ports...}
-                                //      ngx_http_core_srv_conf_t {server_names,connection_pool_size...}
-                                //      ngx_http_core_loc_conf_t {name,regex,static_locations,regex_locations...}
-                                //    再调用 preconfiguration()方法 => ngx_http_variables_add_core_vars() http_host,http_user_agent,http_referer,http_cookie...
-                                //    接着调用ngx_conf_parse()解析block块
-                include mime.types;
-                default_type application/octet-stream;
-                sendfile on;
-                keepalive_timeout 65;
-                server {
-                    listen 8080;
-                    server_name localhost;
-                }
-                location / {
-                    root html;
-                    index index.html index.htm;
-                }
-                error_page 500 502 503 504 /50x.html
-                location = /50x.html {
-                    root html;
-                }
-            }
+cycle = ngx_init_cycle(&init_cycle);
+    /*
+        新创建一个cycle
+        把init_cycle的log,conf_prefix,prefix,conf_file,conf_param都给copy过来
+        初始化 paths,open_files,shared_memory,listening,reusable_connections_queue,
+              conf_ctx,hostname, modules
 
-        配置文件处理完成后,调用CORE MODULES的init_conf方法
-            core:   ngx_core_conf_t.daemon = 1
-                                   .master = 1
-                                   .pid = "logs/nginx.pid"
-                                   .username="nobody"       // 如果以root用户启动的话
-                                   .user = nobody uid       // 如果以root用户启动的话
-                                   .group = nobody gid      // 如果以root用户启动的话
-                                   .lock_file = "logs/nginx.lock"
-                    cycle->lock_file = "logs/nginx.lock.accept"
-            errlog: 没有init_conf()方法
-            events: 没有init_conf()方法
-            regex:  ngx_regex_conf_t.pcre_jit = 0
-            http:   没有init_conf()方法
+        遍历modules中的NGX_CORE_MODULE,如果module有create_conf方法,调用之,
+        返回结果保存到conf_ctx[module index]里.
+
+        初始化conf
+        ngx_conf_param(&conf); => 处理参数-g,最终调用ngx_conf_parse(cf, NULL)
+        ngx_conf_parse(&conf, &cycle->conf_file)
+
+        遍历modules中的NGX_CORE_MODULE,如果module有init_conf方法,调用之.
+        前边调用create_conf返回的结果在init_conf时传了回去.
     */
 
-    /* 小结一下:
-        nginx首先遍历并调用CORE MODULES的create_conf方法,给每个module的配置项分配存储空间.
-        然后解析配置文件,当遇到{}block时,block的command会遍历并调用与其关联的module的create_conf方法,给每个配置项分配存储空间,
-        接着解析{}block块中的配置,完成后再次遍历并调用与其关联的module的init_conf方法.
-        最后,调用CORE MODULES的init_conf方法,完成配置文件的解析.
-     */
+    typedef struct {
+        ngx_str_t             name;
+        void               *(*create_conf)(ngx_cycle_t *cycle);
+        char               *(*init_conf)(ngx_cycle_t *cycle, void *conf);
+    } ngx_core_module_t;
 
-        ngx_test_lockfile(); // 由于 NGX_HAVE_ATOMIC_OPS = 1, 所以这个方法直接返回OK了. 用的是gcc的sync_fetch_*
+    /*
+        哪些是NGX_CORE_MODULE?
+        ngx_module_t *ngx_modules[] = {
+           *CORE*   &ngx_core_module,
+           *CORE*   &ngx_errlog_module,
+            CONF    &ngx_conf_module,
+           *CORE*   &ngx_events_module,
+            EVENT   &ngx_event_core_module,
+            EVENT   &ngx_epoll_module,
+           *CORE*   &ngx_http_module,
+            HTTP    &ngx_http_core_module,
+            HTTP    &ngx_http_log_module,
+            HTTP    &ngx_http_upstream_module,
+            HTTP    &ngx_http_static_module,
+            HTTP    &ngx_http_index_module,
+            HTTP    &ngx_http_write_filter_module,
+            HTTP    &ngx_http_header_filter_module,
+            HTTP    &ngx_http_chunked_filter_module,
+            HTTP    &ngx_http_range_header_filter_module,
+            HTTP    &ngx_http_headers_filter_module,
+            HTTP    &ngx_http_copy_filter_module,
+            HTTP    &ngx_http_range_body_filter_module,
+            HTTP    &ngx_http_not_modified_filter_module,
+                    NULL
+        };
+        CORE MODULE             create_conf                     init_conf
+        ngx_core_module         ngx_core_module_create_conf     ngx_core_module_init_conf
+        ngx_errlog_module       NULL                            NULL
+        ngx_events_module       NULL                            ngx_event_init_conf
+        ngx_http_module         NULL                            NULL
+    */
 
-        ngx_create_pathes();
-            // cycle->pathes有5个,client_body_temp,proxy_temp,fastcgi_temp,uwsgi_temp,scgi_temp
-            // 如果这5个目录不存在,则创建,如果存在并且是以root用户启动的,则检查owner和权限是否和配置的一样,如果不一样chown,chmod
+    ngx_core_module_create_conf(cycle)
+        ngx_core_conf_t *ccf = ngx_pcalloc();
+        ccf->daemon = NGX_CONF_UNSET;
+        ccf->master = NGX_CONF_UNSET;
+        ccf->worker_processes = NGX_CONF_UNSET;
+        // ...
+        return ccf;
 
-        // 接下来open了access.log和error.log
-        //create shared_memory 先略过
+    ngx_conf_parse(&conf, &cycle->conf_file)
+        /*
+            worker_processes  1;
+            error_log  logs/error.log
+            events {
+                worker_connections  1024;
+            }
+            http {
+                keepalive_timeout  65;
+                server {
+                    listen       80;
+                    server_name  localhost;
+                }
+                location / {
+                    root   html;
+                    index  index.html index.htm;
+                }
+                error_page   500 502 503 504  /50x.html;
+                location = /50x.html {
+                    root   html;
+                }
+            }
+        */
 
-        ngx_open_listening_sockets(); // socket() -> bind() -> listen()
-        ngx_configure_listening_sockets(); // setsockopt() rcvbuf,sndbuf,keepalive...
+        // 最终调用 cmd->set(cf, cmd, conf)
 
-        // 把STDERR重定向到error.log
+        typedef struct ngx_command_s {
+            ngx_str_t   name;
+            ngx_uint_t  type;
+            char        *(*set)(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+            ngx_uint_t  conf;
+            ngx_uint_t  offset;
+            void        *post;
+        } ngx_command_t;
 
-        // 遍历ngx_modules,调用其init_module()方法
-        //  regex:      ngx_regex_module_init, 没用过regex,不清楚做什么的
-        //  event_core: ngx_event_module_init, 主要是检查下worker_connections的配置是否大于当前用户可以open的文件数量
-        //                                     然后就是初始化了ngx_accept_mutex和ngx_connection_counter
+        // worker_processes command
+        {
+            ngx_string("worker_processes"),
+            NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+            ngx_set_worker_processes
+            0,
+            0,
+            NULL
+        }
 
-        // OK,到此,新创建的这个cycle初始化完成了,原来的那个cycle(init_cycle)可以丢掉了.
+        typedef struct {
+            ngx_flag_t                daemon;
+            ngx_flag_t                master;
+
+            ngx_msec_t                timer_resolution;
+
+            ngx_int_t                 worker_processes;
+            ngx_int_t                 debug_points;
+
+            ngx_int_t                 rlimit_nofile;
+            off_t                     rlimit_core;
+
+            int                       priority;
+
+            ngx_uint_t                cpu_affinity_auto;
+            ngx_uint_t                cpu_affinity_n;
+            ngx_cpuset_t             *cpu_affinity;
+
+            char                     *username;
+            ngx_uid_t                 user;
+            ngx_gid_t                 group;
+
+            ngx_str_t                 working_directory;
+            ngx_str_t                 lock_file;
+
+            ngx_str_t                 pid;
+            ngx_str_t                 oldpid;
+
+            ngx_array_t               env;
+            char                    **environment;
+        } ngx_core_conf_t;
+
+        // error_log command
+        {
+            ngx_string("error_log"),
+            NGX_MAIN_CONF|NGX_CONF_1MORE,
+            ngx_error_log,
+            0,
+            0,
+            NULL
+        }
+
+        // events command
+        {
+            ngx_string("events"),
+            NGX_MAIN_CONF|NGX_CONF_BLOCK|NGX_CONF_NOARGS,
+            ngx_events_block,
+            0,
+            0,
+            NULL
+        }
+        ngx_events_block()
+            // 由于ngx_events_module没有create_conf,所以conf_ctx[module index]=NULL
+            // 这里给每个NGX_EVENT_MOUDLE都分配一个指针,用于保存他们的create_conf.
+            // 并把这个指针数组的地址保存到conf_ctx[module_index]里.
+            /*
+                cycle->conf_ctx
+                    | - ngx_core_conf_t *
+                    | - void *
+                    |       | - ngx_event_conf_t
+                    |       | - ngx_epoll_conf_t
+             */
+            // 接下来继续ngx_conf_parse()
+            // worker_connections command
+            {
+                ngx_string("worker_connections"),
+                NGX_EVENT_CONF|NGX_CONF_TAKE1,
+                ngx_event_connections,
+                0,
+                0,
+                NULL
+            }
+            typedef struct {
+                ngx_uint_t    connections;
+                ngx_uint_t    use;
+                ngx_flag_t    multi_accept;
+                ngx_flag_t    accept_mutex;
+                ngx_msec_t    accept_mutex_delay;
+                u_char       *name;
+            } ngx_event_conf_t;
+            typedef struct {
+                ngx_uint_t events;
+                ugx_uint_t aio_requests;
+            } ngx_epoll_conf_t;
+            // 最后调用module的init_conf
+            ngx_event_core_init_conf();
+                epoll_create();
+            ngx_epoll_init_conf();
+                events = 512;
+                aio_requests = 32;
+
+            // http command
+            {
+                ngx_string("http"),
+                NGX_MAIN_CONF|NGX_CONF_BLOCK|NGX_CONF_NOARGS,
+                ngx_http_block,
+                0,
+                0,
+                NULL
+            }
+            ngx_http_block()
+                /*
+                    cycle->conf_ctx
+                        | - ngx_core_conf_t *
+                        | - void *
+                        |       | - ngx_event_conf_t
+                        |       | - ngx_epoll_conf_t
+                        | - ngx_http_conf_ctx_t *
+                */
+                typedef struct {
+                    void        **main_conf;
+                    void        **srv_conf;
+                    void        **loc_conf;
+                } ngx_http_conf_ctx_t;
+                // 遍历NGX_HTTP_MODULE,create_main_conf,create_srv_conf,create_loc_conf
+                // preconfiguration
+                // ngx_conf_parse()
+                // init_main_conf,ngx_http_merge_servers
+                // ngx_http_init_locations, ngx_http_init_static_location_trees
+                // postconfiguration
+
+    // conf_file处理完成后,调用NGX_CORE_MODULE的init_conf方法
+    ngx_core_module_init_conf()
+        daemon = 1;
+        master = 1;
+        // ...
+    ngx_event_init_conf()
+        // 确保有events配置
+
+
+    ngx_init_modules(); // 调用module的init_module()方法
+
 
 ngx_os_status();
         // 如果error.log配置的是notice的话,这里会打印出 nginx version, built by, ostype, osrelease, rlimit_nofile
 
-ngx_process = NGX_PROCESS_MASTER;
+ngx_cycle = cycle;
+
+ccf = (ngx_core_conf_t *)ngx_get_conf(cycle->conf_ctx, ngx_core_module);
+if (ccf->master && ngx_process == NGX_PROCESS_SINGLE) {
+    ngx_process = NGX_PROCESS_MASTER;
+}
 
 ngx_init_signals(); // 绑定signal handler -> ngx_signal_handler
 ngx_daemon(); // daemonize, 并重定向STDIN,STDOUT到/dev/null
