@@ -25,6 +25,87 @@
 <img src="IMG_0719.PNG">
 <img src="IMG_0720.PNG">
 <img src="IMG_0721.PNG">
+
+<div style="width:800px;font-size:18px;">
+
+
+				<h2 class="title icon">
+					Synchronization - Understanding the System Clock
+				</h2>
+
+
+
+
+
+
+
+
+				<div class="content">
+					<div id="post_message_900504">
+						<blockquote class="postcontent restore ">
+<u><b>The System Clock - Understanding what it is and how it determines CPU and bus speeds</b></u><br>
+<br>
+Many people know about the FSB (Front Side Bus) and it's relation to the CPU and RAM. Many people also know that in order to take advantage of fast RAM and/or CPU the FSB needs to be fast enough (and vice versa) to prevent bottlenecking. That's all very important information to know when building or upgrading a computer. But how are these speeds determined? How is the FSB speed determined? How about the CPU or the PCI bus, etc? The answer is quite simple: the System Clock. We are going to be taking a deep look into the system clock, what it is, how it affects the speed of your computer and how all of this ties into overclocking.<br>
+<br>
+<br>
+<u><b>What the heck is a System Clock and how does it work?</b></u><br>
+<br>
+The system clock is a quartz crystal on the motherboard that, when very slightly bent or disformed, produces an electric signal or pulse. When electric current hits the crystal, it's the electrons bouncing off of the crystal that causes it to slightly bend or fluctuate, therefore causing the crystal to produce an electric pulse or what's known as a <b>clock cycle</b> or <b>clock pulse</b>. <br>
+<br>
+Definition of a Clock Pulse:<br>
+<br>
+<i>In synchronous digital electronics, such as most computers, a clock signal is a signal used to coordinate the actions of two or more circuits. A clock signal oscillates between a high and a low state, normally with a 50% duty cycle. In other words, the signal is a square wave. The circuits using the clock signal for synchronization may become active at either the rising or falling edge, or both (for example DDR SDRAM), of the clock signal.</i><br>
+Source: <a rel="nofollow" href="http://en.wikipedia.org/wiki/Clock_cycle" target="_blank">http://en.wikipedia.org/wiki/Clock_cycle</a><br>
+<br>
+<b>So without getting this to complicated, a clock pulse is basically an electronic signal that tells components when it can start sending/receiving data.</b> It is the heartbeat of the computer. It's pulses can be used directly or scaled up or down in frequency for different buses. This enables different components on different buses to communicate with each other efficiently, therefore synchronizing all of the components together.<br>
+<br>
+Understand that the System Clock doesn't just send one clock pulse every other second, that would cause the computer to be extremely slow and would have no real use in today's world. The System Clock generates hundreds of millions of clock pulses a second (mhz). The most common clock speeds of today's motherboards are 100mhz, 133mhz, and 166mhz. However high end computers have system clock speeds of 200mhz and over.<br>
+<br>
+<br>
+<br>
+<u><b>How the System Clock affects the speed of the FSB</b></u><br>
+<br>
+Well, this actually depends on whether or not you have an Intel CPU or an AMD CPU. An Intel CPU is designed to send data 4 times for every CPU clock cycle at the speed of the System Clock (Quad Pumped). So if the System Clock is set at 200mhz, the CPU sends data 4 times along the FSB, each time at the speed of 200mhz, which is why the FSB is said to be 800mhz. AMD CPU's are a little different, they send data 2 times along the FSB for every CPU clock cycle at the speed of the system clock (Double Pumped).<br>
+<br>
+<i>Important Notice: this info is assuming the CPU's are 32-bit for simplicities sake. 64-bit CPU's work differently and I will explain them in a later paper.</i><br>
+<br>
+<br>
+<br>
+<u><b>So does the type of the FSB determine the type of RAM I should get for optimal performance?</b></u><br>
+<br>
+You bet. You see, when Dual Pumped FSB (AMD) technology was introduced, regular SDRAM couldn't keep up. That's because while data from the processor was being sent twice per clock cycle, regular SDRAM was only sending data once per clock cycle. So in order to avoid this bottlenecking, DDR was soon introduced. With DDR RAM it is possible for the RAM to send and receive data twice per clock cycle. So because of this, the CPU and DDR RAM can now send and receive data at the same time. <br>
+<br>
+Quad Pumped FSB (Intel) technology, allows the CPU to send and receive data 4 times per clock cycle. In order to avoid bottlenecking Intel and the Rambus Corporation created RIMM's or Rambus memory. Like DDR, Rambus only sent data twice per clock cycle but it was a lot faster then DDR. Since then, Rambus has come and gone and now Dual Channel memory is recommended for Intel's Quad Pumped FSB's, even though it still does not truely take full advantage of Quad Pumped FSB technology.<br>
+<br>
+<br>
+<br>
+<u><b>How the System Clock determines the speed of the CPU</b></u><br>
+<br>
+On the CPU there is this thing called a multiplier. What this does is take the clock pulse from the System Clock and multiply it. The value the Multiplier is set at depends on the CPU and usually cannot be changed. The Multiplier for Pentium 4's are usually set to 14 or 15. So if the System Clock is set at 200mhz and the Multiplier is set at 15, then you multiply 200,000,000 by 15 which is of course 3 billion or 3ghz! How do you figure out what the multiplier is? Well, you can look in the CMOS setup or you can divide the FSB by 4(Intel) or 2(AMD) to get the System Clock and divide that by the speed of the CPU. So multiplier = CPU speed / (FSB /  2 or 4) depending on if it's an Intel or AMD. This information is important to know when overclocking your CPU.<br>
+<br>
+<i>Important Notice: this info is assuming the CPU's are 32-bit for simplicities sake. 64-bit CPU's work differently and I will explain them in a later paper.</i><br>
+<br>
+<br>
+<br>
+<u><b>So do all the other buses use Multipliers as well?</b></u><br>
+<br>
+No. The other buses, like the AGP bus and the PCI bus for example, use Dividers. They take the System Clock pulses and divide them to a usuable speed for the PCI components and AGP card. You can change the Divider values in the CMOS setup or with jumper settings on the motherboard, but it isn't recommended unless your overclocking your computer. The AGP bus divider is set to specifically make the bus speed 66 mhz. The PCI bus divider is set to make the PCI bus speed 33mhz. Components that use the AGP and PCI bus are designed to run at those speeds. So if you set the divider to make the bus speed faster then those speeds, the components using those buses may be unusuable. On the other hand, if you make the bus speed slower, those components won't communicate effeciently with the rest of the components in the computer.<br>
+<br>
+If your overclocking your CPU then you must increase the System Clock speed. Increasing the System Clock speed increases all the other bus speeds. Basically, the only thing you should overclock is the FSB, CPU and Memory Bus (GPU and VRAM on a video card can be overclocked as well but I won't get into that here). All of the buses connected to the South Bridge should not be changed. So while increasing the System Clock, it's important to go back and adjust the AGP and PCI bus Dividers accordingly. Unless the AGP and PCI bus are asynchronous, which means they are automatically set to run at 66mhz and 33mhz no matter what the System Clock is set at. It is worth noting that the AGP bus is more flexible in terms of overclocking when compared to the PCI bus, but you're better off just overclocking the video card.<br>
+<br>
+<br>
+<br>
+<u><b>Conclusion</b></u><br>
+<br>
+So you always knew that a 2.4ghz processor running on a 533 FSB with PC3200 RAM was a good setup, but now you know how those speeds are determined and you are now armed with the knowledge and understanding of how overclocking works. You now know what a System Clock is, what it does, and why it's so important and how it allows all of the components within the computer to communicate with each other efficiently.
+						</blockquote>
+					</div>
+
+
+				</div>
+			</div>
+
+
 <img src="IMG_0722.PNG">
 <img src="IMG_0723.PNG">
 <img src="IMG_0724.PNG">
@@ -35,7 +116,6 @@
 <img src="IMG_0729.PNG">
 <img src="IMG_0730.PNG">
 <img src="IMG_0731.PNG">
-<img src="IMG_0732.PNG">
 <img src="IMG_0733.PNG">
 <img src="IMG_0734.PNG">
 <img src="IMG_0735.PNG">
