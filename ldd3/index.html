@@ -1,0 +1,91 @@
+<meta charset="utf-8">
+
+<h3>如何编译内核?</h3>
+
+<pre>
+1. 从 https://www.kernel.org/ 下载kernel源码. 如: linux-3.13.tar.xz
+2. 解压
+3.  cd /path/to/linux-3.13
+        make mrproper
+        mkdir -p build/kernel
+        make O=/path/to/linux-3.13/build/kernel menuconfig
+        make O=/path/to/linux-3.13/build/kernel
+        sudo make O=/path/to/linux-3.13/build/kernel modules_install install
+4. install的结果会在 /boot/ 目录生成4个文件
+        config-3.13.0
+        initrd.img-3.13.0
+        System.map-3.13.0
+        vmlinuz-3.13.0
+    还会在 /lib/modules 目录生成一个 3.13.0 子目录,里边包含了编译好的modules以及其它一些不知道干嘛的文件
+5. /lib/modules里有两个软链接
+        build -> /path/to/linux-3.13/build/kernel
+        source -> /path/to/linux-3.13
+    build这个目录在编译module时会用到.
+</pre>
+
+<h3>如何编译自己的module?</h3>
+<pre>
+1. 直接编译
+    make -C /path/to/linux-3.13/build/kernel M=`pwd` modules
+2. 懒人做法
+    Makefile
+        利用 /lib/modules/3.13.0/build 目录
+        @see ldd3 page 24
+</pre>
+
+<h3>如何加载卸载module</h3>
+<pre>
+1. tail -f /var/log/syslog
+2. sudo insmod ./hello.ko
+3. sudo rmmod hello
+
+或者使用modprobe
+</pre>
+
+<h3>如何查看kernel当前已经加载的modules?</h3>
+<pre>
+    cd /sys/module
+OR
+    cat /proc/modules
+</pre>
+
+<h3>kernel当前加载了多少device?</h3>
+<pre>
+    cat /proc/devices
+</pre>
+
+<h3>device如何加载进kernel?</h3>
+<pre>
+首先要定下来device major number. 有两种办法:
+1. 自已定一个,然后MKDEV(major_number, minor_number),再register_chrdev_region(first_dev, count, dev_name)
+2. 让kernel动态分配一个(preferred),alloc_chrdev_region(&dev, firstminor, count, dev_name)
+    kernel使用一个hashtable chrdevs[CHRDEV_MAJOR_HASH_SIZE=255]来管理所有的char devices.
+    动态分配的major number就是chrdevs从后向前第一个null的index.
+然后初始化一个struct cdev, add进kernel. 初始化也有两种办法:
+1. struct cdev *my_cdev = cdev_alloc(); my_cdev->ops = &my_fops;
+2. cdev_init(&my_cdev, &my_fpos);
+最后cdev_add(&cdev, MKDEV(major, minor), count = 1).
+kernel使用一个struct kobj_map *cdev_map来记录所有cdev.
+</pre>
+
+<h3>device怎么起作用的?</h3>
+<pre>
+首先,需要通过mknod生成一个文件,如:
+
+    mknod my_chrdev1 c 200 0
+
+在生成对应的inode时,发现是char device,于是就:
+
+    inode->i_fop = &def_chr_fops;
+    inode->i_rdev = rdev;
+
+def_chr_fops.open = chrdev_open.
+
+    struct cdev *p = inode->i_cdev;
+    if (!p) {
+        kobj = kobj_lookup(cdev_map, inode->i_rdev);
+        inode->i_cdev = p = container_of(kobj, struct cdev, kobj);
+    }
+    filp->f_op = inode->i_cdev->ops;
+    filp->f_op->open(inode, filp);
+</pre>
