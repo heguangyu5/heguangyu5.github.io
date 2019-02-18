@@ -89,3 +89,82 @@ def_chr_fops.open = chrdev_open.
     filp->f_op = inode->i_cdev->ops;
     filp->f_op->open(inode, filp);
 </pre>
+
+<h3>怎么操作/控制device?</h3>
+<pre>
+Every peripheral device is controlled by writing and reading its registers.
+
+读写这些registers有两种方式:
+1. I/O Ports (inb/outb, inw/outw, inl/outl)
+2. I/O Memory (ioremap|_PAGE_BIT_IOMAP ioread8/iowrite8, ioread16/iowrite16, ioread32/iowrite32)
+
+At the hardware level, there is no conceptual difference between memory regions and I/O regions: both of them are accessed by asserting electrical signals on the address bus and control bus (i.e., the read and write signals)* and by reading from or writing to the data bus.
+
+如何区分是读取内存还是读取device?
+
+The processor sets another line on the control bus--An I/O ACCESS line. If this line is set, The I/O Controllers from within the I/O SubSystem watches the Address Bus. If the Address Bus currosponds to a number that is assigned to the device, that device takes the value from the data bus and acts upon it. The Memory Controller ignores any request if this line is set. So, if the port number has not been assigned, absolutley nothing happens. No controller acts on it, and the Memory Controller ignores it.
+</pre>
+
+<h3>I/O Port如何确定?</h3>
+<pre>
+看起来像是约定好的.比如 arch/x86/kernel/setup.c
+
+static struct resource standard_io_resources[] = {
+	{ .name = "dma1", .start = 0x00, .end = 0x1f,
+		.flags = IORESOURCE_BUSY | IORESOURCE_IO },
+	{ .name = "pic1", .start = 0x20, .end = 0x21,
+		.flags = IORESOURCE_BUSY | IORESOURCE_IO },
+	{ .name = "timer0", .start = 0x40, .end = 0x43,
+		.flags = IORESOURCE_BUSY | IORESOURCE_IO },
+	{ .name = "timer1", .start = 0x50, .end = 0x53,
+		.flags = IORESOURCE_BUSY | IORESOURCE_IO },
+	{ .name = "keyboard", .start = 0x60, .end = 0x60,
+		.flags = IORESOURCE_BUSY | IORESOURCE_IO },
+	{ .name = "keyboard", .start = 0x64, .end = 0x64,
+		.flags = IORESOURCE_BUSY | IORESOURCE_IO },
+	{ .name = "dma page reg", .start = 0x80, .end = 0x8f,
+		.flags = IORESOURCE_BUSY | IORESOURCE_IO },
+	{ .name = "pic2", .start = 0xa0, .end = 0xa1,
+		.flags = IORESOURCE_BUSY | IORESOURCE_IO },
+	{ .name = "dma2", .start = 0xc0, .end = 0xdf,
+		.flags = IORESOURCE_BUSY | IORESOURCE_IO },
+	{ .name = "fpu", .start = 0xf0, .end = 0xff,
+		.flags = IORESOURCE_BUSY | IORESOURCE_IO }
+};
+
+void __init reserve_standard_io_resources(void)
+{
+	int i;
+
+	/* request I/O space for devices used on all i[345]86 PCs */
+	for (i = 0; i &lt; ARRAY_SIZE(standard_io_resources); i++)
+		request_resource(&ioport_resource, &standard_io_resources[i]);
+}
+
+所有的I/O Port都保存在ioport_resource里,cat /proc/ioport读取的就是这个数据结构.
+</pre>
+
+<h3>I/O Memory如何确定?</h3>
+<pre>
+PCI device在其Configuration Registers写好了,直接用就行.
+</pre>
+
+<h3>IRQ Number怎么确定?</h3>
+<pre>
+PCI device在其Configuration Registers写好了,直接用就行.
+其它设备如果有默认约定,按约定的来.没有的话,就得猜了.怎么猜?
+把当前没有用的IRQ Number挨个注册到自己写的handler上,然后启用设备中断,当收到中断信号时就知道是哪个IRQ Number了.
+</pre>
+
+<h3>shared IRQ Number是怎么工作的?</h3>
+<pre>
+注册的时候一定要加上dev_id.
+当中断发生时,kernel会调用所有注册这个irq number的handler.
+在各自的handler里,要向自己的设备确认是否有中断,如果有,返回handled,这样kernel就不再调用别的handler了.
+否则,返回none,这样kernel就继续调用别的handler.
+</pre>
+
+<h3>如果查看系统当前IRQ Number的使用情况?</h3>
+<pre>
+cat /proc/interrupts
+</pre>
