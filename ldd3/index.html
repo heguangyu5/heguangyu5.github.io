@@ -174,3 +174,172 @@ PCI device在其Configuration Registers写好了,直接用就行.
 <pre>
 cat /proc/interrupts
 </pre>
+
+<h3>Linux Device Model</h3>
+<pre>
+struct kobject {
+    const char *name;
+    struct list_head entry;
+    struct kobject *parent;
+    struct kset *kset;
+    struct kobj_type *ktype;
+    struct sysfs_dirent *sd;
+    struct kref kref;
+    unsigned int state_initialized:1;
+    unsigned int state_in_sysfs:1;
+    unsigned int state_add_uevent_sent:1;
+    unsigned int state_remove_uevent_sent:1;
+    unsigned int uevent_suppress:1;
+};
+struct kobj_type {
+    void (*release)(struct kobject *kobj);
+    const struct sysfs_ops *sysfs_ops;
+    struct attribute **default_attrs;
+    // ...
+};
+
+/*
+a set of kobjects of a specific type, belonging to a specific subsystem
+
+A kset defines a group of kobjects.  They can be individually
+different "types" but overall these kobjects all want to be grouped
+together and operated on in the same manner.  ksets are used to
+define the attribute callbacks and other common events that happen to
+a kobject.
+*/
+struct kset {
+    struct list_head list;
+    spinlock_t list_lock;
+    struct kobject kobj;
+    const struct kset_uevent_ops *uevent_ops;
+};
+struct kset *kset_create_and_add(
+    const char *name,
+    const struct kset_uevent_ops *uevent_ops,
+    struct kobject *parent_kobj
+) {
+    struct kset *kset = kset_create(name, uevent_ops, parent_kobj);
+    kobject_add_internal(&k->kobj);
+    kobject_uevent(&k->kobj, KOBJ_ADD);
+}
+/*
+kset.list是归属这个kset的kobjects的起点.
+
+            kset {              kobject {               kobject {
+       ---&gt;    list   &lt;--------&gt;  entry   &lt;-------&gt;     entry  &lt; --
+       |    }                   }                       }         |
+       |                                                          |
+       |----------------------------------------------------------|
+
+不管是kobject还是kset,只要设置了name,都会在sysfs下创建一个目录,并将每个attribute创建成文件.
+*/
+
+/*
+If @parent is set, then the parent of the @kobj will be set to it.
+If @parent is NULL, then the parent of the @kobj will be set to the
+kobject associted with the kset assigned to this kobject. If no kset
+is assigned to the kobject, then the kobject will be located in the
+root of the sysfs tree.
+*/
+
+int kobject_add(struct kobject *kobj, struct kobject *parent, const char *fmt, ...);
+struct kobject *kobject_create_and_add(const char *name, struct kobject *parent);
+int kobject_init_and_add(struct kobject *kobj, struct kobj_type *ktype, struct kobject *parent, const char *fmt, ...);
+    if (kobj->parent) {
+        parent_sd = kobj->parent->sd;
+    } else {
+        parent_sd = &sysfs_root;
+    }
+    create_dir(kobj, parent_sd, ..., kobject_name(kobj), &sd);
+    kobj->sd = sd;
+
+// sysfs的每个目录对应一个kobject或一个kset.它们都是怎么来的呢?
+void __init mnt_init()
+{
+    sysfs_init()
+    fs_kobj = kobject_create_and_add("fs", NULL);
+}
+/*
+显然,第一个创建的目录是fs,我的电脑上fs下有5个子目录,分别是cgroup,ecryptfs,ext4,fuse,pstore
+
+ext4/
+├── features
+│   ├── batched_discard
+│   ├── lazy_itable_init
+│   └── meta_bg_resize
+└── sda1
+    ├── delayed_allocation_blocks
+    ├── err_ratelimit_burst
+    ├── err_ratelimit_interval_ms
+    ├── ...
+    ├── lifetime_write_kbytes
+    ├── ...
+    ├── session_write_kbytes
+*/
+
+// 在 fs/ext4/super.c 里 (ext4 module)
+module_init(ext4_init_fs)
+static int __init ext4_init_fs(void)
+{
+    ext4_kset = kset_create_and_add("ext4", NULL, fs_kobj);
+}
+static int ext4_fill_super(struct super_block *sb, void *data, int silent)
+{
+    struct ext4_sb_info *sbi = kzalloc();
+    sbi->s_kobj.kset = ext4_kset;
+    kobject_init_and_add(&sbi->s_kobj, &ext4_ktype, NULL, "%s", sb->s_id);
+}
+static int __init ext4_init_feat_adverts(void)
+{
+    struct ext4_features *ef = kzalloc();
+    ef->f_kobj.kset = ext4_kset;
+    kobject_init_and_add(&ef->f_kobj, &ext4_feat_ktype, NULL, "features");
+    ext4_feat = ef;
+}
+
+struct ext4_sb_info {
+    // ...
+    struct kboject s_kobj;
+    // ...
+}
+struct ext4_features {
+    struct kboject f_kobj;
+    // ...
+}
+
+
+static struct kobj_type ext4_ktype = {
+    .default_attrs = ext4_attrs,
+    .sysfs_ops = &ext4_attr_ops,
+    .release = &ext4_sb_release
+};
+static struct kobj_type ext4_feat_ktype = {
+    .default_attrs = ext4_feat_attrs,
+    .sysfs_ops = &ext4_attr_ops,
+    .release = ext4_feat_release
+};
+
+static struct attribute *ext4_attrs[] = {
+    &ext4_attr_delayed_allocation_blocks.attr,
+    &ext4_attr_session_write_kbytes.attr,
+    &ext4_attr_lifetime_write_kbytes.attr,
+    // ...
+    NULL
+};
+static struct ext4_feat_attrs[] = {
+    &ext4_attr_lazy_itable_init.attr = {.name = lazy_itable_init, .mode = 0444},
+    &ext4_attr_batched_discard.attr  = {.name = batched_discard, .mode = 0444},
+    NULL
+};
+
+// 在 fs/fuse/inode.c 里
+module_init(fuse_init);
+fuse_init()
+{
+    fuse_fs_init()
+    {
+        fuse_kobj = kobject_create_and_add("fuse", fs_kobj);
+        connections_kobj = kobject_create_and_add("connections", fuse_kobj);
+    }
+}
+</pre>
