@@ -252,7 +252,10 @@ int kobject_init_and_add(struct kobject *kobj, struct kobj_type *ktype, struct k
     }
     create_dir(kobj, parent_sd, ..., kobject_name(kobj), &sd);
     kobj->sd = sd;
+</pre>
 
+<h3>Linux Device Model - /sys/fs/</h3>
+<pre>
 // sysfs的每个目录对应一个kobject或一个kset.它们都是怎么来的呢?
 void __init mnt_init()
 {
@@ -342,4 +345,143 @@ fuse_init()
         connections_kobj = kobject_create_and_add("connections", fuse_kobj);
     }
 }
+</pre>
+
+<h3>Linux Device Model - uevent</h3>
+<pre>
+int kset_register(struct kset *k) {
+    kobject_add_internal(&k->kobj);
+    kobject_uevent(&k->kobj, KOBJ_ADD);
+        /*
+            notify userspace by sending an uevent
+            这个event是发给kset的,所以如果一个kobject如果没有归属的kset,那就会找它的parent的kset.
+            如果最终没有找到kset,那么这个event就发不了了.
+            为什么要找kset呢,因为kset里才有uevent_ops.
+            kobject可以将自身的uevent_suppress flag打开以阻止发送event.
+        */
+        struct kset_uevent_ops {
+            int (* const filter)(kset, kobj);
+            const char *(* const name)(kset, kobj);
+            int (* const uevent)(kset, kobj, env);
+        };
+        // uevent_ops.filter也是阻止event发送的一个办法
+        /* uevent env有几个默认的项
+            ACTION=add/remove
+            DEVPATH=kobject path
+            SUBSYSTEM=kset name or uevent_ops->name()
+            SEQNUM=seq
+        */
+        // 具体的发送是通过netlink完成的. man 7 netlink
+}
+</pre>
+
+<h3>Linux Device Model - /sys/{devices,dev,bus,class,firmware,hypervisor}/</h3>
+<pre>
+void start_kernel(void)
+{
+    // ...
+    rest_init(); // 这是start_kernel的最后一个调用
+        kernel_thread(kernel_init, NULL, CLONE_FS | CLONE_SIGHAND);
+        kernel_thread(kthreadd,    NULL, CLONE_FS | CLONE_FILES);
+        cpu_idle();
+}
+int kernel_init(void *unused)
+{
+    // ...
+    do_basic_setup();
+        // ...
+        <b style="color:red">driver_init();</b>
+        init_irq_proc();
+        do_ctors();
+        do_initcalls();
+    sys_open("/dev/console", O_RDWR, 0);
+    init_post();
+        run_init_process("/init");
+}
+
+void driver_init(void)
+{
+    devtmpfs_init();
+    devices_init();
+        devices_kset = kset_create_and_add("devices", &device_uevent_ops, NULL);
+        dev_kobj = kobject_create_and_add("dev", NULL);
+        sysfs_dev_block_kobj = kobject_create_and_add("block", dev_kobj);   // /sys/dev/block
+        sysfs_dev_char_kobj  = kobject_create_and_add("char", dev_kobj);    // /sys/dev/char
+    buses_init();
+        bus_kset = kset_create_and_add("bus", &bus_uevent_ops, NULL);
+    classes_init();
+        class_kset = kset_create_and_add("class", NULL, NULL);
+    firmware_init();
+        firmware_kobj = kobject_create_and_add("firmware", NULL);
+    hypervisor_init();
+        hypervisor_kobj = kobject_create_and_add("hypervisor", NULL);
+    platform_bus_init();
+    system_bus_init();
+    cpu_dev_init();
+    memory_dev_init();
+}
+</pre>
+
+<h3>Linux Device Model - /sys/{kernel,module,block}</h3>
+<pre>
+<b style="color:red">do_initcalls();</b>
+
+int ksysfs_init(void)
+{
+    struct kobject *kernel_kobj = kobject_create_and_add("kernel", NULL);
+    sysfs_create_group(kernel_kobj, &kernel_attr_group);
+}
+core_initcall(ksysfs_init);
+
+kernel_attr_group.attrs
+    uevent_seqnum
+    uevent_helper
+    profiling
+    kexec_loaded
+    kexec_crash_loaded
+    kexec_crash_size
+    vmcoreinfo
+
+int slab_sysfs_init(void)
+{
+    slab_kset = kset_create_and_add("slab", &slab_uevent_ops, kernel_kobj);
+}
+__initcall(slab_sysfs_init);
+
+int mm_sysfs_init(void)
+{
+    mm_kobj = kobject_create_and_add("mm", kernel_kobj);
+}
+__initcall(mm_sysfs_init);
+
+int pm_init(void)
+{
+    power_kobj = kobject_create_and_add("power", NULL);
+    sysfs_create_group(power_kobj, &attr_group);
+}
+core_initcall(pm_init);
+
+attr_group.attrs
+    state
+    pm_trace
+    pm_trace_dev_match
+    pm_async
+    wakeup_count
+    pm_test
+
+int param_sysfs_init(void)
+{
+    module_kset = kset_create_and_add("module", &module_uevent_ops, NULL);
+    version_sysfs_builtin(); // 和 MODULE_VERSION 有关
+    param_sysfs_builtin();
+}
+subsys_initcall(param_sysfs_init);
+
+int genhd_device_init(void)
+{
+    block_class.dev_kobj = sysfs_dev_block_kobj;
+    class_register(&block_class);
+    block_depr = kobject_create_and_add("block", NULL);
+}
+subsys_initcall(genhd_device_init);
 </pre>
