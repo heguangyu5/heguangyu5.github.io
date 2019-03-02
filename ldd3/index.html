@@ -485,3 +485,34 @@ int genhd_device_init(void)
 }
 subsys_initcall(genhd_device_init);
 </pre>
+
+<h3>ACPI</h3>
+<pre>
+void start_kernel(void)
+{
+    setup_arch(&command_line);
+        acpi_boot_table_init();
+            acpi_table_init();
+                acpi_initialize_tables()
+                    acpi_gbl_root_table_list = {.tables, current_table_count, max_table_count, flags}
+                    rsdp_address = acpi_os_get_root_pointer();
+                    acpi_tb_parse_root_table(); // RSDT
+                        tables[0] = DSDT        // major table describe peripherals, PCI IRQ mappings, power management
+                        tables[1] = FACS
+                        tables[2] = FACP/FADT   // DSDT和FACS table是从这个table parse出来的
+                        tables[3] = APIC
+                        tables[4] = SSDT        // DSDT的补充
+}
+
+int acpi_init(void)
+{
+    acpi_kobj = kobject_create_and_add("acpi", firmware_kobj); // /sys/firmware/acpi
+    acpi_bus_init();
+        acpi_enable_subsystem();
+            acpi_enable();
+                // acpi_gbl_root_table_list里的table数量超过3才能enable
+                // ACPI_SYS_MODE_ACPI    acpi_hw_write_port(acpi_gbl_FADT.smi_command, acpi_gbl_FADT.acpi_enable)
+                // ACPI_SYS_MODE_LEGACY  acpi_hw_write_port(acpi_gbl_FADT.smi_command, acpi_gbl_FADT.acpi_disable)
+                // for循环不停地检查是否enable成功,最多等3秒
+}
+subsys_initcall(acpi_init);
