@@ -1,14 +1,18 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
 <meta charset="utf-8">
-<style type="text/css">
-pre {
-    max-width: 800px;
-    white-space: pre-wrap;
-}
-</style>
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="../prism.css">
+</head>
+<body>
+<div class="container">
 
 <h3>如何编译内核?</h3>
 
-<pre>
+<pre><code>
 1. 从 https://www.kernel.org/ 下载kernel源码. 如: linux-3.13.tar.xz
 2. 解压
 3.  cd /path/to/linux-3.13
@@ -27,41 +31,41 @@ pre {
         build -> /path/to/linux-3.13/build/kernel
         source -> /path/to/linux-3.13
     build这个目录在编译module时会用到.
-</pre>
+</code></pre>
 
 <h3>如何编译自己的module?</h3>
-<pre>
+<pre><code>
 1. 直接编译
     make -C /path/to/linux-3.13/build/kernel M=`pwd` modules
 2. 懒人做法
     Makefile
         利用 /lib/modules/3.13.0/build 目录
         @see ldd3 page 24
-</pre>
+</code></pre>
 
 <h3>如何加载卸载module</h3>
-<pre>
+<pre><code>
 1. tail -f /var/log/syslog
 2. sudo insmod ./hello.ko
 3. sudo rmmod hello
 
 或者使用modprobe
-</pre>
+</code></pre>
 
 <h3>如何查看kernel当前已经加载的modules?</h3>
-<pre>
+<pre><code>
     cd /sys/module
 OR
     cat /proc/modules
-</pre>
+</code></pre>
 
 <h3>kernel当前加载了多少device?</h3>
-<pre>
+<pre><code>
     cat /proc/devices
-</pre>
+</code></pre>
 
 <h3>device如何加载进kernel?</h3>
-<pre>
+<pre><code>
 首先要定下来device major number. 有两种办法:
 1. 自已定一个,然后MKDEV(major_number, minor_number),再register_chrdev_region(first_dev, count, dev_name)
 2. 让kernel动态分配一个(preferred),alloc_chrdev_region(&dev, firstminor, count, dev_name)
@@ -72,10 +76,10 @@ OR
 2. cdev_init(&my_cdev, &my_fpos);
 最后cdev_add(&cdev, MKDEV(major, minor), count = 1).
 kernel使用一个struct kobj_map *cdev_map来记录所有cdev.
-</pre>
+</code></pre>
 
 <h3>device怎么起作用的?</h3>
-<pre>
+<pre><code>
 首先,需要通过mknod生成一个文件,如:
 
     mknod my_chrdev1 c 200 0
@@ -94,10 +98,10 @@ def_chr_fops.open = chrdev_open.
     }
     filp->f_op = inode->i_cdev->ops;
     filp->f_op->open(inode, filp);
-</pre>
+</code></pre>
 
 <h3>怎么操作/控制device?</h3>
-<pre>
+<pre><code>
 Every peripheral device is controlled by writing and reading its registers.
 
 读写这些registers有两种方式:
@@ -109,10 +113,10 @@ At the hardware level, there is no conceptual difference between memory regions 
 如何区分是读取内存还是读取device?
 
 The processor sets another line on the control bus--An I/O ACCESS line. If this line is set, The I/O Controllers from within the I/O SubSystem watches the Address Bus. If the Address Bus currosponds to a number that is assigned to the device, that device takes the value from the data bus and acts upon it. The Memory Controller ignores any request if this line is set. So, if the port number has not been assigned, absolutley nothing happens. No controller acts on it, and the Memory Controller ignores it.
-</pre>
+</code></pre>
 
 <h3>I/O Port如何确定?</h3>
-<pre>
+<pre><code class="language-c">
 看起来像是约定好的.比如 arch/x86/kernel/setup.c
 
 static struct resource standard_io_resources[] = {
@@ -148,35 +152,35 @@ void __init reserve_standard_io_resources(void)
 }
 
 所有的I/O Port都保存在ioport_resource里,cat /proc/ioport读取的就是这个数据结构.
-</pre>
+</code></pre>
 
 <h3>I/O Memory如何确定?</h3>
-<pre>
+<pre><code>
 PCI device在其Configuration Registers写好了,直接用就行.
-</pre>
+</code></pre>
 
 <h3>IRQ Number怎么确定?</h3>
-<pre>
+<pre><code>
 PCI device在其Configuration Registers写好了,直接用就行.
 其它设备如果有默认约定,按约定的来.没有的话,就得猜了.怎么猜?
 把当前没有用的IRQ Number挨个注册到自己写的handler上,然后启用设备中断,当收到中断信号时就知道是哪个IRQ Number了.
-</pre>
+</code></pre>
 
 <h3>shared IRQ Number是怎么工作的?</h3>
-<pre>
+<pre><code>
 注册的时候一定要加上dev_id.
 当中断发生时,kernel会调用所有注册这个irq number的handler.
 在各自的handler里,要向自己的设备确认是否有中断,如果有,返回handled,这样kernel就不再调用别的handler了.
 否则,返回none,这样kernel就继续调用别的handler.
-</pre>
+</code></pre>
 
 <h3>如果查看系统当前IRQ Number的使用情况?</h3>
-<pre>
+<pre><code>
 cat /proc/interrupts
-</pre>
+</code></pre>
 
 <h3>Linux Device Model</h3>
-<pre>
+<pre><code class="language-c">
 struct kobject {
     const char *name;
     struct list_head entry;
@@ -252,10 +256,10 @@ int kobject_init_and_add(struct kobject *kobj, struct kobj_type *ktype, struct k
     }
     create_dir(kobj, parent_sd, ..., kobject_name(kobj), &sd);
     kobj->sd = sd;
-</pre>
+</code></pre>
 
 <h3>Linux Device Model - /sys/fs/</h3>
-<pre>
+<pre><code class="language-c">
 // sysfs的每个目录对应一个kobject或一个kset.它们都是怎么来的呢?
 void __init mnt_init()
 {
@@ -345,10 +349,10 @@ fuse_init()
         connections_kobj = kobject_create_and_add("connections", fuse_kobj);
     }
 }
-</pre>
+</code></pre>
 
 <h3>Linux Device Model - uevent</h3>
-<pre>
+<pre><code class="language-c">
 int kset_register(struct kset *k) {
     kobject_add_internal(&k->kobj);
     kobject_uevent(&k->kobj, KOBJ_ADD);
@@ -373,10 +377,10 @@ int kset_register(struct kset *k) {
         */
         // 具体的发送是通过netlink完成的. man 7 netlink
 }
-</pre>
+</code></pre>
 
 <h3>Linux Device Model - /sys/{devices,dev,bus,class,firmware,hypervisor}/</h3>
-<pre>
+<pre><code class="language-c">
 void start_kernel(void)
 {
     // ...
@@ -390,7 +394,7 @@ int kernel_init(void *unused)
     // ...
     do_basic_setup();
         // ...
-        <b style="color:red">driver_init();</b>
+        driver_init();
         init_irq_proc();
         do_ctors();
         do_initcalls();
@@ -420,11 +424,11 @@ void driver_init(void)
     cpu_dev_init();
     memory_dev_init();
 }
-</pre>
+</code></pre>
 
 <h3>Linux Device Model - /sys/{kernel,module,block}</h3>
-<pre>
-<b style="color:red">do_initcalls();</b>
+<pre><code class="language-c">
+do_initcalls();
 
 int ksysfs_init(void)
 {
@@ -484,10 +488,10 @@ int genhd_device_init(void)
     block_depr = kobject_create_and_add("block", NULL);
 }
 subsys_initcall(genhd_device_init);
-</pre>
+</code></pre>
 
 <h3>ACPI</h3>
-<pre>
+<pre><code class="language-c">
 void start_kernel(void)
 {
     setup_arch(&command_line);
@@ -502,17 +506,546 @@ void start_kernel(void)
                         tables[2] = FACP/FADT   // DSDT和FACS table是从这个table parse出来的
                         tables[3] = APIC
                         tables[4] = SSDT        // DSDT的补充
-}
-
-int acpi_init(void)
-{
-    acpi_kobj = kobject_create_and_add("acpi", firmware_kobj); // /sys/firmware/acpi
-    acpi_bus_init();
-        acpi_enable_subsystem();
+    // ...
+    acpi_early_init();
+        acpi_reallocate_root_table();
+        acpi_initialize_subsystem();
+        acpi_load_tables();
+        acpi_enable_subsystem(~(ACPI_NO_HARDWARE_INIT | ACPI_NO_ACPI_ENABLE));
             acpi_enable();
                 // acpi_gbl_root_table_list里的table数量超过3才能enable
                 // ACPI_SYS_MODE_ACPI    acpi_hw_write_port(acpi_gbl_FADT.smi_command, acpi_gbl_FADT.acpi_enable)
                 // ACPI_SYS_MODE_LEGACY  acpi_hw_write_port(acpi_gbl_FADT.smi_command, acpi_gbl_FADT.acpi_disable)
                 // for循环不停地检查是否enable成功,最多等3秒
+            acpi_tb_initialize_facs();
+    // ...
+}
+
+int pci_arch_init(void)
+{
+    type = pci_direct_probe();
+    pci_mmcfg_early_init();
+    pci_direct_init(type = 1);
+}
+arch_initcall(pci_arch_init);
+
+int acpi_init(void)
+{
+    acpi_kobj = kobject_create_and_add("acpi", firmware_kobj); // /sys/firmware/acpi
+    acpi_bus_init();
+        acpi_enable_subsystem(ACPI_NO_HARDWARE_INIT | ACPI_NO_ACPI_ENABLE);
+            acpi_tb_initialize_facs();
+            acpi_ev_install_region_handlers();
+            acpi_ev_initialize_events();
+            acpi_ev_install_xrupt_handlers();
+        acpi_ec_ecdt_probe();
+        acpi_bus_osc_support();
+        acpi_initialize_objects(ACPI_FULL_INITIALIZATION);
+        acpi_sysfs_init();
+            acpi_tables_sysfs_init();
+                tables_kobj         = kobject_create_and_add("tables", acpi_kobj);
+                dynamic_tables_kobj = kobject_create_and_add("dynamic", tables_kobj);
+                do {
+                    acpi_get_table_by_index();
+                    sysfs_create_bin_file(tables_kobj, &table_attr->attr);
+                    acpi_table_attr_list
+                } while();
+                kobject_uevent(tables_kobj, KOBJ_ADD);
+                kobject_uevent(dynamic_tables_kobj, KOBJ_ADD);
+                acpi_install_table_handler(acpi_sysfs_table_handler, NULL);
+        acpi_early_processor_set_pdc();
+        acpi_boot_ec_enable();
+        acpi_sleep_init();
+        acpi_bus_init_irq();
+        acpi_install_notify_handler();
+        acpi_root_dir = proc_mkdir(ACPI_BUS_FILE_ROOT, NULL);
+    pci_mmcfg_late_init();
+    acpi_scan_init();
+        bus_register(&acpi_bus_type);
+        acpi_power_init();
+            acpi_bus_register_driver(&acpi_power_driver);
+        acpi_bus_scan(ACPI_ROOT_OBJECT, &ops(add=1,start=1), &acpi_root);
+        acpi_bus_scan_fixed();
+            ACPI_FADT_POWER_BUTTON
+            ACPI_FADT_SLEEP_BUTTON
+        acpi_update_all_gpes();
+    acpi_ec_init();
+        // https://en.wikipedia.org/wiki/Embedded_controller
+        acpi_bus_register_driver(&acpi_ec_driver);
+    acpi_debugfs_init();
+        // /sys/kernel/debug/acpi/
+    acpi_sleep_proc_init();
+        // /proc/acpi/wakeup    acpi_system_wakeup_device_fops
+    acpi_wakeup_device_init();
+        acpi_wakeup_device_list
 }
 subsys_initcall(acpi_init);
+</code></pre>
+
+<h3>bus</h3>
+<pre><code class="language-c">
+struct bus_type {
+    const char *name;
+    struct bus_attribute    *bus_attrs;
+    struct device_attribute *dev_attrs;
+    struct driver_attribute *drv_attrs;
+
+    int (*macth)(struct device *dev, struct device_driver *drv);
+    int (*uevent)(struct device *dev, struct kobj_uevent_env *env);
+    int (*probe)(struct device *dev);
+    int (*remove)(struct device *dev);
+    void (*shutdown)(struct device *dev);
+
+    int (*suspend)(struct device *dev, pm_message_t state);
+    int (*resume)(struct device *dev);
+
+    const struct dev_pm_ops *pm;
+
+    struct subsys_private *p;
+};
+
+struct subsys_private {
+    struct kset subsys;
+    struct kset *deveces_kset;
+
+    struct kset *drivers_kset;
+    struct klist klist_devices;
+    struct klist klist_drivers;
+    struct blocking_notifier_head bus_notifier;
+    unsigned int drivers_autoprobe:1;
+    struct bus_type *bus;
+
+    struct list_head class_interfaces;
+    struct kset glue_dirs;
+    struct mutex class_mutex;
+    struct class *class;
+};
+
+struct bus_type acpi_bus_type {
+    .name    = "acpi",
+    .match   = acpi_bus_match,
+    .uevent  = acpi_device_uevent,
+    .probe   = acpi_device_probe,
+    .remove  = acpi_device_remove,
+    .suspend = acpi_device_suspend,
+    .resume  = acpi_device_resume
+};
+
+int bus_register(struct bus_type *bus)
+{
+    struct subsys_private *priv = kzalloc();
+    priv->bus = bus;
+    bus->p = priv;
+
+    kobject_set_name(&priv->subsys.kobj, "%s", bus->name);
+    priv->subsys.kobj.kset  = bus_kset;
+    priv->subsys.kobj.ktype = &bus_ktype;
+    priv->drivers_autoprobe = 1;
+    kset_register(&priv->subsys);               // /sys/bus/acpi/
+    bus_create_file(bus, &bus_attr_uevent);     // /sys/bus/acpi/uevent
+
+    priv->devices_kset = kset_create_and_add("devices", ...);   // /sys/bus/acpi/devices/
+    priv->drivers_kset = kset_create_and_add("drivers", ...);   // /sys/bus/acpi/drivers/
+
+    add_probe_files(bus);   // /sys/bus/acpi/{drivers_probe,drivers_autoprobe}
+    bus_add_attrs(bus);
+}
+
+struct device_driver {
+    const char *name;
+    struct bus_type *bus;
+    struct module *woner;
+    const char *mod_name;
+    // ...
+    const struct attribute_group **groups;
+    // ...
+    struct driver_private *p;
+};
+struct driver_private {
+    struct kobject kobj;
+    struct klist klist_devices;
+    struct klist_node knode_bus;
+    struct module_kobject *mkobj;
+    struct device_driver *driver;
+};
+struct acpi_driver
+{
+    char name[80];
+    char class[80];
+    const struct acpi_device_id *ids;
+    unsigned int flags;
+    struct acpi_device_ops ops;
+    struct device_driver drv;
+    struct module *owner;
+}
+struct acpi_driver acpi_power_driver {
+    .name  = "power",
+    .class = ACPI_POWER_CLASS = "power_resource",
+    .ids   = power_device_ids = {{ACPI_POWER_HID="LNXPOWER", 0}},
+    .ops   = {
+                .add    = acpi_power_add,
+                .remove = acpi_power_remove,
+                .resume = acpi_power_resume
+             }
+};
+
+int acpi_bus_register_driver(struct acpi_driver *driver)
+{
+    driver->drv->name = driver->name;
+    driver->drv->bus  = &acpi_bus_type;
+    driver->drv.owner = driver->owner;
+    driver_register(&driver->drv);
+}
+
+int driver_register(struct device_driver *drv)
+{
+    driver_find(drv->name, drv->bus);
+    // 前边我们知道归属同一个kset的kobject形成了一个双向链表
+    // driver_find查找bus->p->drivers_kset,看这个driver是不是已经注册过了
+    // 如果没有,继续bus_add_driver
+    bus_add_driver(drv);
+        struct driver_private *priv = kzalloc();
+        priv->driver = drv;
+        drv->p = priv;
+
+        priv->kobj.kset = bus->p->drivers_kset;
+        kobject_init_and_add(&priv->kobj, &driver_ktype, NULL, "%s", drv->name);
+        if (drv->bus->p->drivers_autoprobe) {
+            driver_attach(drv);
+                bus_for_each_dev(drv->bus, NULL, drv, __driver_attach);
+                // 遍历bus->p->klist_devices,call __driver_attach(dev, drv)
+                    __driver_attach(dev, drv)
+                        driver_match_device(drv, dev); // drv->bus->match(dev, drv) => acpi_bus_match
+                        // 如果match到了的话,probe
+                        driver_probe_device(drv, dev);
+                            dev->bus->probe(dev) || drv->probe(dev)
+        }
+        klist_add_tail(&priv->knode_bus, &bus->p->klist_drivers);
+        driver_create_file(drv, &driver_attr_uevent); // /sys/bus/acpi/drivers/power/uevent
+        driver_add_attrs(bus, drv);                   // bus->drv_attrs
+        add_bind_files(drv);                          // /sys/bus/acpi/drivers/power/{unbind,bind}
+        kobject_uevent(&priv->kobj, KOBJ_ADD);
+    driver_add_groups(drv, drv->groups);
+}
+</code></pre>
+
+<h3>acpi_bus_check_add</h3>
+<pre><code class="language-c">
+struct acpi_device {
+    int device_type;
+    acpi_handle handle;
+    struct acpi_device *parent;
+    struct list_head children;
+    struct list_head node;
+    struct list_head wakeup_list;
+    struct acpi_device_status status;
+    struct acpi_device_flags flags;
+    struct acpi_device_pnp pnp;
+    struct acpi_device_power power;
+    struct acpi_device_wakeup wakeup;
+    struct acpi_device_perf performance;
+    struct acpi_device_dir dir;
+    struct acpi_device_ops ops;
+    struct acpi_driver *driver;
+    void *driver_data;
+    struct device dev;
+    struct acpi_bus_ops bus_ops;
+    enum acpi_bus_removal_type removal_type;
+};
+
+struct acpi_device_pnp {
+    acpi_bus_id bus_id;
+    acpi_bus_address bus_address;
+    char *unique_id;
+    struct list_head ids;
+    acpi_device_name device_name;
+    acpi_device_class device_class;
+};
+
+struct acpi_device_flags {
+    u32 dynamic_status:1;
+    u32 bus_address:1;
+    u32 removable:1;
+    u32 ejectable:1;
+    u32 lockable:1;
+    u32 suprise_removal_ok:1;
+    u32 power_manageable:1;
+    u32 performance_manageable:1;
+    u32 reserved:24;
+};
+
+struct device {
+    struct device *parent;
+    struct device_private *p;
+    struct kobject kobj;
+    const char *init_name;
+    struct device_type *type;
+    struct bus_type *bus;
+    struct device_driver *driver;
+    void *platform_data;
+    dev_t devt;
+    struct class *class;
+};
+
+acpi_status acpi_bus_check_add(acpi_handle, ...)
+{
+    acpi_bus_type_and_status(ACPI_ROOT_OBJECT, &type, &sta);
+        /*
+            ACPI_BUS_TYPE_DEVICE
+            ACPI_BUS_TYPE_PROCESSOR
+            ACPI_BUS_TYPE_THERMAL
+            ACPI_BUS_TYPE_POWER
+
+            ACPI_STA_DEVICE_PRESENT
+            ACPI_STA_DEVICE_ENABLED
+            ACPI_STA_DEVICE_UI
+            ACPI_STA_DEVICE_FUNCTIONING
+            ACPI_STA_DEVICE_OK
+            ACPI_STA_BATTERY_PRESENT
+        */
+    device = NULL;
+    acpi_add_single_object(&device, handle = -1, type = 0, sta = 0x0f, ops(add=1,start=1));
+        struct acpi_device *device = kzalloc()
+        device->device_type = type;
+        device->handle = handle;
+        device->parent = acpi_bus_get_parent(handle);
+        device->bus_ops = *ops(add=1,start=1);
+        device->status = sta;
+
+        acpi_device_get_busid(device);
+            ACPI_IS_ROOT_DEVICE(device) device->php.bus_id = "ACPI"
+            ACPI_BUS_TYPE_POWER_BUTTON  device->php.bus_id = "PWRF"
+            ACPI_BUS_TYPE_SLEEP_BUTTON  device->php.bus_id = "SLPF"
+            default:                    device->php.bus_id = acpi_get_name()
+        acpi_bus_get_flags(device)
+            device->flags.dynamic_status
+            removable
+            ejectable
+            lockable
+            power_manageable
+        acpi_device_set_id(device)
+            switch (device->device_type) {
+            case ACPI_BUS_TYPE_DEVICE:
+                ACPI_IS_ROOT_DEVICE(device) acpi_add_id(device, ACPI_SYSTEM_HID);
+                acpi_get_object_info(&info)
+                info->valid & ACPI_VALID_HID acpi_add_id(device, info->hardware_id.string)
+                info->valid & ACPI_VALID_CID acpi_add_id(device, cid_list->ids[i].string)
+                info->valid & ACPI_VALID_ADR device->pnp.bus_address = info->address
+                acpi_is_video_device acpi_add_id(device, ACPI_VIDEO_HID)
+                // ...
+                break;
+            case ACPI_BUS_TYPE_POWER:
+                acpi_add_id(device, ACPI_POWER_HID);
+                    struct acpi_hardware_id;
+                    list_add_tail(&id->list, device->pnp.ids)
+                break;
+            case ACPI_BUS_TYPE_PROCESSOR:
+                acpi_add_id(device, ACPI_PROCESSOR_OBJECT_HID);
+                break;
+            case ACPI_BUS_TYPE_THERMAL:
+                acpi_add_id(device, ACPI_THERMAL_HID);
+                break;
+            case ACPI_BUS_TYPE_POWER_BUTTON:
+                acpi_add_id(device, ACPI_BUTTON_HID_POWERF);
+                break;
+            case ACPI_BUS_TYPE_SLEEP_BUTTON:
+                acpi_add_id(device, ACPI_BUTTON_HID_SLEEPF);
+                break;
+            }
+        // 一个acpi_device有一个bus_id: acpi_device.pnp.bus_id
+        // 但可能会有多个hardware_id,通过acpi_device.pnp.ids形成一个双向链表
+        acpi_device_register(device);
+            struct acpi_device_bus_id {
+                char bus_id[15];
+                unsigned int instance_no;
+                struct list_head node;
+            };
+            // 所有的device按照bus_id(就是个字符串)作为识别标记,生成一个acpi_bus_id_list
+            // bus_id是可以重复的,用instance_no区分
+            dev_set_name(&device->dev, "%s:%02x", acpi_device_bus_id->bus_id, acpi_device_bus_id->instance_no);
+                device->dev->kobj.name
+            device->dev.bus = &acpi_bus_type;
+            device->dev.release = &acpi_device_release;
+            device_register(&device->dev);
+                device_initialize(dev);
+                    dev->kobj.kset = devices_kset;
+                device_add(dev);
+                    device_private_init(dev);
+                    if (!dev_name(dev)) {
+                        error = -EINVAL;
+                        goto name_error;
+                        // device的name要么是init_name,要么是kboj.name
+                    }
+                    device_create_file(dev, &uevent_attr);
+                    if (MAJOR(dev->devt)) {
+                        device_create_file(dev, &devt_attr);
+                        device_create_sys_dev_entry(dev);
+                            /sys/dev/{block,char}/xxx -> /sys/devices/xxx
+                        devtmpfs_create_node(dev);
+                    }
+                    device_add_class_symlinks(dev);
+                    device_add_attrs(dev);
+                    bus_add_device(dev);
+                        /sys/bus/acpi/devices/xxx -> /sys/devices/LNXSYSTM:00/xxx
+                    dpm_sysfs_add(dev);
+                    device_pm_add(dev);
+                    bus_probe_device(dev);
+                        if (bus->p->drivers_autoprobe) {
+                            device_attach(dev);
+                                if (dev->driver) {
+                                    device_bind_driver(dev);
+                                        sysfs_create_link(driver, dev);
+                                            /sys/bus/acpi/drivers/xxx -> /sys/devices/xxx
+                                            /sys/devices/xxx/driver -> /sys/bus/acpi/drivers/xxx
+                                    driver_bound(dev);
+                                }
+                                bus_for_each_drv(dev->bus, NULL, dev, __device_attach);
+                                    __device_attach(drv, dev)
+                                        driver_match_device(drv, dev);
+                                            driver->bus->match(dev, drv);
+                                        driver_probe_device(drv, dev);
+                                            really_probe(dev, drv);
+                                                if (dev->bus->probe) {
+                                                    dev->bus->probe(dev);
+                                                } else if (drv->probe) {
+                                                    drv->probe(dev);
+                                                }
+                        }
+            acpi_device_setup_files(device);
+                device_create_file(&device->dev, &dev_attr_path);
+                device_create_file(&device->dev, &dev_attr_hid);
+                device_create_file(&device->dev, &dev_attr_modalias);
+                device_create_file(&device->dev, &dev_attr_eject);
+}
+</code></pre>
+
+<h3>acpi_device_probe</h3>
+<pre><code class="language-c">
+int acpi_device_probe(struct device *dev)
+{
+    struct acpi_device *acpi_dev = to_acpi_device(dev);
+    struct acpi_driver *acpi_drv = to_acpi_driver(dev->driver);
+    acpi_bus_driver_init(acpi_dev, acpi_drv);
+        driver->ops.add(device);
+        device->driver = driver;
+    acpi_start_single_object(acpi_dev);
+        driver->ops.start(device);
+}
+</code></pre>
+
+<h3>acpi_pci_root_init</h3>
+<pre><code class="language-c">
+int acpi_pci_root_init(void)
+{
+    acpi_bus_register_driver(&acpi_pci_root_driver);
+}
+subsys_initcall(acpi_pci_root_init);
+
+struct acpi_driver acpi_pci_root_driver = {
+    .name  = "pci_root",
+    .class = ACPI_PCI_ROOT_CLASS = "pci_bridge",
+    .ids   = root_device_ids = {"PNP0A03"},
+    .ops   = {
+            .add    = acpi_pci_root_add,
+            .remove = acpi_pci_root_remove,
+            .start  = acpi_pci_root_start
+        }
+};
+</code></pre>
+
+<h3>acpi_pci_root_add/start</h3>
+<pre><code class="language-c">
+// acpi_bus_scan() scan到PNP0A03后,match -> probe -> add -> start
+
+struct acpi_pci_root {
+    struct list_head node;
+    struct acpi_device *device;
+    struct acpi_pci_id id;
+    struct pci_bus *bus;
+    u16 segment;
+    struct resource secondary;
+    // ...
+};
+
+struct acpi_pci_id {
+    u16 segment;
+    u16 bus;
+    u16 device;
+    u16 function;
+};
+
+struct pci_bus {
+    struct list_head node;
+    struct pci_bus *parent;
+    struct list_head children;
+    struct list_head devices;
+    struct pci_dev *self;
+    // ...
+    unsigned char number;       // bus number
+    unsigned char primary;      // number of primary bridge
+    unsigned char secondary;    // number of secondary bridge
+    unsigned char subordinate;  // max number of subordinate buses
+    unsigned char max_bus_speed;
+    unsigned char cur_bus_speed;
+    char name[48];
+    // ...
+};
+
+int acpi_pci_root_add(struct acpi_device *device)
+{
+    struct acpi_pci_root *root = kzalloc();
+    root->device = device;
+    device->driver_data = root;
+    root->bus = pci_acpi_scan_root(root);
+        bus = pci_create_bus(NULL, busnum, &pci_root_ops, sd);
+            struct pci_bus *b = pci_alloc_bus();
+            struct device *dev = kzalloc();
+            dev_set_name(dev, "pci%04x:%02x", pci_domain_nr(b), bus);
+            device_register(dev);
+            b->dev.class = &pcibus_class;
+            dev_set_name(&b->dev, "%04x:%02x", pci_domain_nr(b), bus);
+            device_register(&b->dev);
+        bus->subordinate = pci_scan_child_bus(bus);
+            pci_scan_slot(bus, devfn);
+                pci_scan_single_device(bus, devfn);
+                    pci_scan_device(bus, devfn);
+                        pci_bus_read_config_dword(bus, devfn, PCI_VENDOR_ID, &l);
+                        struct pci_dev *dev = alloc_pci_dev();
+                        pci_setup_device(dev);
+                    pci_device_add(dev, bus);
+            pci_scan_bridge();
+    acpi_pci_find_root(device);
+    acpi_pci_irq_and_prt();
+
+    list_for_each_entry(child, &device->children, node)
+        acpi_pci_bridge_scan(child);
+}
+int acpi_pci_root_start(struct acpi_device *device)
+{
+    pci_bus_add_devices(root->bus);
+}
+</code></pre>
+
+<h3>/sys/bus/pci</h3>
+<pre><code class="language-c">
+struct bus_type pci_bus_type {
+    .name      = "pci",
+    .match     = pci_bus_match,
+    .uevent    = pci_uevent,
+    .probe     = pci_device_probe,
+    // ...
+    .dev_attrs = pci_dev_attrs,
+    .bus_attr  = pci_bus_attrs
+};
+
+int pci_driver_init(void)
+{
+    return bus_register(&pci_bus_type);
+}
+postcore_initcall(pci_driver_init);
+</code></language>
+
+</div>
+<script src="../prism.js"></script>
+</body>
+</html>
