@@ -6,6 +6,8 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#include "mandelbrot.h"
+
 static void print_fb_bitfield(struct fb_bitfield *field)
 {
     printf("  offset = %u\n", field->offset);
@@ -118,7 +120,7 @@ int main(void)
     print_finfo(&finfo);
 
     long screensize = vinfo.yres_virtual * finfo.line_length;
-    printf("screensize = %ld = %ld MB\n", screensize, screensize / 1024 / 1024);
+    printf("screensize = %ld = %.2f MB\n", screensize, screensize / 1024 / 1024.);
 
     uint8_t *fbp = mmap(NULL, screensize, PROT_READ | PROT_WRITE, MAP_SHARED, fb_fd, 0);
     if (fbp == MAP_FAILED) {
@@ -137,6 +139,8 @@ int main(void)
         }
         usleep(100000);
     }
+
+    mandelbrot(fbp, vinfo.xres, vinfo.yres, vinfo.bits_per_pixel);
 
     return 0;
 }

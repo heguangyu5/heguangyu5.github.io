@@ -7,6 +7,8 @@
 #include <drm/drm_mode.h>
 #include <unistd.h>
 
+#include "mandelbrot.h"
+
 static void print_drm_mode_card_res(struct drm_mode_card_res *res)
 {
     printf("--drm_mode_card_res--\n");
@@ -151,6 +153,7 @@ int main(void)
     long fb_h[10]     = {0};
 
     int i;
+    int first_valid_connector = -1;
     for (i = 0; i < res.count_connectors; i++) {
         if (res_conn_buf[i] == 0) {
             continue;
@@ -206,9 +209,10 @@ int main(void)
         ioctl(dri_fd, DRM_IOCTL_MODE_MAP_DUMB, &map_dumb);
 
         printf(
-            "fb size = %#llx = %llu MB, width = %u, height = %u\n",
+            "connector %d: fb size = %#llx = %.2f MB, width = %u, height = %u\n",
+            i,
             create_dumb.size,
-            create_dumb.size / 1024 / 1024,
+            create_dumb.size / 1024 / 1024.,
             create_dumb.width,
             create_dumb.height
         );
@@ -235,23 +239,31 @@ int main(void)
         crtc.mode = conn_mode_buf[0];
         crtc.mode_valid = 1;
         ioctl(dri_fd, DRM_IOCTL_MODE_SETCRTC, &crtc);
+
+        if (first_valid_connector == -1) {
+            first_valid_connector = i;
+        }
     }
 
     ioctl(dri_fd, DRM_IOCTL_DROP_MASTER, 0);
 
+    if (first_valid_connector == -1) {
+        printf("no available connector found\n");
+        return 1;
+    }
+
     for (i = 0; i < 30; i++) {
-        int j;
-        for (j = 0; j < res.count_connectors; j++) {
-            int x, y;
-            for (y = 0; y < fb_h[j]; y++) {
-                for (x = 0; x < fb_w[j]; x++) {
-                    int location = y * fb_w[j] + x;
-                    *(((uint32_t *)fb_base[j]) + location) = 0x00ff00ff;
-                }
+        int x, y;
+        for (y = 0; y < fb_h[first_valid_connector]; y++) {
+            for (x = 0; x < fb_w[first_valid_connector]; x++) {
+                int location = y * fb_w[first_valid_connector] + x;
+                *(((uint32_t *)fb_base[first_valid_connector]) + location) = 0x00ff00ff;
             }
         }
         usleep(100000);
     }
+
+    mandelbrot(fb_base[first_valid_connector], fb_w[first_valid_connector], fb_h[first_valid_connector], 32);
 
     return 0;
 }
