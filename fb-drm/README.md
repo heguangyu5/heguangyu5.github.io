@@ -42,3 +42,5 @@ The next higher-level API is **OpenGL**. So if you want to use more GPU features
 ## Summary
 
 `GEM -> drm-intel / drm-radeon / drm-nouveau -> OpenGL (mesa3D)`
+
+`kernel module (drm/i915) -> user space mesa driver (i965_dri.so) -> mesa3D OpenGL`
