@@ -232,6 +232,77 @@ struct ngx_module_s {
 };
 </code></pre>
 
+<h3>ngx_pool_t 内存管理</h3>
+<pre><code class="language-c">
+ngx_pool_t *ngx_create_pool(size_t size, ngx_log_t *log);
+    // 分配一块大小为size的内存,开头一段保存ngx_pool_t信息,后边是可分配空间
+    struct ngx_pool_s {
+        struct nginx_pool_data_t {
+            u_char      *last;  // 内存分配到哪个地方了,下次分配时从这个位置开始
+            u_char      *end;   // 内存块结束的位置,pool不记录大小,通过end-pool得到大小
+            ngx_pool_t  *next;  // 当前可分配内存不够时,会再分配一块内存,pool中所有的内存块通过next形成一个单链表
+            ngx_uint_t  failed; // 如果当前内存块超过4次都分配失败,更改pool.current的指向下一个内存块,
+                                // 这样不用每次都从链表的开头遍历
+        } d;
+        size_t max; // 内存块减去开头的ngx_pool_t后,最大可用空间,分配内存时,
+                    // 如果小于这个大小,调用ngx_palloc_small,从链表的内存块中找可用内存
+                    // 如果大于这个大小,调用ngx_palloc_large,直接malloc,
+                    // 并ngx_palloc_small一个ngx_pool_large_t,将malloc返回的指针记录在large->alloc里
+                    // 多个large通过next形成另一个单链表
+        ngx_pool_t *current;
+        ngx_chain_t *chain;
+        ngx_pool_large_t *large; {
+            ngx_pool_large_t *next;
+            void             *alloc;
+        }
+        ngx_pool_cleanup_t *cleanup; {
+            ngx_pool_cleanup_pt handler;
+            void *data;
+            ngx_pool_cleanup_t *next;
+        }
+        ngx_log_t *log; // 内存分配出错,方便记录出错信息
+    }
+
+void *ngx_palloc(ngx_pool_t *pool, size_t size);
+    // 如果size <= pool->max, ngx_palloc_small, 否则ngx_palloc_large
+void *ngx_pnalloc(ngx_pool_t *pool, size_t size);
+    // 同ngx_palloc,只不过不需要内存对齐
+ngx_pmemalign(ngx_pool_t *pool, size_t size, size_t alignment);
+    // 直接分配内存,也当作large加入到large链表里
+ngx_pcalloc(ngx_pool_t *pool, size_t size);
+    // 先调用ngx_palloc分配内存,然后将分配的内存清0
+ngx_pool_cleanup_t *ngx_pool_cleanup_add(ngx_pool_t *p, size_t size);
+    // 将分配的内存封装在ngx_pool_cleanup_t里,这样可以添加一个handler/callback,
+    // 在需要时通过遍历cleanup链表对分配的内存执行动作
+ngx_pfree(ngx_pool_t *pool, void *p);
+    // free large内存块
+ngx_reset_pool(ngx_pool_t *pool);
+    // free large内存块,将small内存块全部标记为可用
+ngx_destroy_pool(ngx_pool_t *pool);
+    // 1. run cleanup handler
+    // 2. free large
+    // 3. free small
+</code></pre>
+
+<h3>ngx_array_t 动态数组</h3>
+<pre><code class="language-c">
+ngx_array_t *ngx_array_create(ngx_pool_t *p, ngx_uint_t n, size_t size);
+    // 创建一个新数组,n个元素,每个元素大小为size
+    struct ngx_array_t {
+        void        *elts;  // ngx_palloc(pool, n * size), 真正的数组元素
+        ngx_uint_t  nelts;  // 当前使用量
+        size_t      size;   // 数组元素大小
+        ngx_uint_t  nalloc; // 可用量/已分配量
+        ngx_pool_t  *pool;
+    }
+
+void *ngx_array_push(ngx_array_t *a);
+void *ngx_array_push_n(ngx_array_t *a, ngx_uint_t n);
+    // 返回数组元素开始指针
+void ngx_array_destroy(ngx_array_t *a);
+    // 如果数组在pool的末尾,标记为可用内存,否则,不做处理
+</code></pre>
+
 <h3>main()</h3>
 <pre><code class="language-c">// http://localhost/lxr/source/src/core/nginx.c?v=nginx-1.14.0#0195
 ngx_strerror_init();
@@ -311,26 +382,25 @@ cycle = ngx_init_cycle(&init_cycle);
     /*
         新创建一个cycle
         把init_cycle的log,conf_prefix,prefix,conf_file,conf_param都给copy过来
-        初始化 paths,open_files,shared_memory,listening,reusable_connections_queue,
-              conf_ctx,hostname, modules
+        初始化   paths
+                config_dump
+                config_dump_rbtree
+                open_files
+                shared_memory
+                listening
+                reusable_connections_queue
+                conf_ctx
+                hostname
+                modules
+    /*
 
-        遍历modules中的NGX_CORE_MODULE(module.type),如果module有create_conf方法,调用之,
-        返回结果保存到conf_ctx[module index]里.
-
-        初始化conf
-        ngx_conf_param(&conf); => 处理参数-g,最终调用ngx_conf_parse(cf, NULL)
-        ngx_conf_parse(&conf, &cycle->conf_file)
-
-        遍历modules中的NGX_CORE_MODULE,如果module有init_conf方法,调用之.
-        前边调用create_conf返回的结果在init_conf时传了回去.
-    */
-
+    // 遍历cycle->modules中module.type=NGX_CORE_MODULE的module,如果create_conf方法,调用之,
+    // 返回结果保存到cycle->conf_ctx[module->index]里.
     typedef struct {
         ngx_str_t             name;
         void               *(*create_conf)(ngx_cycle_t *cycle);
         char               *(*init_conf)(ngx_cycle_t *cycle, void *conf);
     } ngx_core_module_t;
-
     /*
         哪些是NGX_CORE_MODULE?
         ngx_module_t *ngx_modules[] = {
@@ -370,7 +440,6 @@ cycle = ngx_init_cycle(&init_cycle);
         ngx_http_module         NULL                            NULL
         ngx_stream_module       NULL                            NULL
     */
-
     ngx_core_module_create_conf(cycle)
         ngx_core_conf_t *ccf = ngx_pcalloc();
         ccf->daemon = NGX_CONF_UNSET;
@@ -379,6 +448,11 @@ cycle = ngx_init_cycle(&init_cycle);
         // ...
         return ccf;
 
+    /*
+        初始化conf
+        ngx_conf_param(&conf); => 处理参数-g,最终调用ngx_conf_parse(cf, NULL)
+        ngx_conf_parse(&conf, &cycle->conf_file)
+    */
     ngx_conf_parse(&conf, &cycle->conf_file)
         /*
             worker_processes  1;
@@ -408,12 +482,15 @@ cycle = ngx_init_cycle(&init_cycle);
                 }
             }
         */
-
-            rc = ngx_conf_read_token(cf);
-            // 从 nginx.conf 文件中读取一个token
-            ngx_conf_handler(cf, rc);
-            // 遍历 modules 的 commands, 找到 token 对应的 cmd
-                cmd->set(cf, cmd, conf)
+        rc = ngx_conf_read_token(cf);
+        // 从 nginx.conf 文件中读取一个token
+        ngx_conf_handler(cf, rc);
+        // 遍历 modules 的 commands, 找到 token 对应的 cmd
+            cmd->set(cf, cmd, conf)
+            // 第一个参数cf(conf),是当前整个conf上下文
+            // 第三个参数conf,是和module自身相关的.
+            //      比如 worker_processes cmd, 它的type是NGX_DIRECT_CONF,
+            //      此时conf就是ngx_core_module在init_conf时创建的那个conf.
 
             typedef struct ngx_command_s {
                 ngx_str_t   name;
@@ -424,96 +501,133 @@ cycle = ngx_init_cycle(&init_cycle);
                 void        *post;
             } ngx_command_t;
 
-        // worker_processes command
-        {
-            ngx_string("worker_processes"),
-            NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
-            ngx_set_worker_processes
-            0,
-            0,
-            NULL
-        }
-
-        typedef struct {
-            ngx_flag_t                daemon;
-            ngx_flag_t                master;
-
-            ngx_msec_t                timer_resolution;
-
-            ngx_int_t                 worker_processes;
-            ngx_int_t                 debug_points;
-
-            ngx_int_t                 rlimit_nofile;
-            off_t                     rlimit_core;
-
-            int                       priority;
-
-            ngx_uint_t                cpu_affinity_auto;
-            ngx_uint_t                cpu_affinity_n;
-            ngx_cpuset_t             *cpu_affinity;
-
-            char                     *username;
-            ngx_uid_t                 user;
-            ngx_gid_t                 group;
-
-            ngx_str_t                 working_directory;
-            ngx_str_t                 lock_file;
-
-            ngx_str_t                 pid;
-            ngx_str_t                 oldpid;
-
-            ngx_array_t               env;
-            char                    **environment;
-        } ngx_core_conf_t;
-
-        // events command
-        {
-            ngx_string("events"),
-            NGX_MAIN_CONF|NGX_CONF_BLOCK|NGX_CONF_NOARGS,
-            ngx_events_block,
-            0,
-            0,
-            NULL
-        }
-        ngx_events_block()
-            // 由于ngx_events_module没有create_conf,所以conf_ctx[module index]=NULL
-            // 这里给每个NGX_EVENT_MOUDLE都分配一个指针,用于保存他们的create_conf.
-            // 并把这个指针数组的地址保存到conf_ctx[module_index]里.
-            /*
-                cycle->conf_ctx
-                    | - ngx_core_conf_t *
-                    | - void *
-                    |       | - ngx_event_conf_t
-                    |       | - ngx_epoll_conf_t
-             */
-            // 接下来继续ngx_conf_parse()
-            // worker_connections command
+            // worker_processes command
             {
-                ngx_string("worker_connections"),
-                NGX_EVENT_CONF|NGX_CONF_TAKE1,
-                ngx_event_connections,
+                ngx_string("worker_processes"),
+                NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+                ngx_set_worker_processes
                 0,
                 0,
                 NULL
             }
+
             typedef struct {
-                ngx_uint_t    connections;
-                ngx_uint_t    use;
-                ngx_flag_t    multi_accept;
-                ngx_flag_t    accept_mutex;
-                ngx_msec_t    accept_mutex_delay;
-                u_char       *name;
-            } ngx_event_conf_t;
-            typedef struct {
-                ngx_uint_t events;
-                ugx_uint_t aio_requests;
-            } ngx_epoll_conf_t;
-            // 最后调用module的init_conf
-            ngx_event_core_init_conf();
-                epoll_create();
-            ngx_epoll_init_conf();
-                events = 512;
-                aio_requests = 32;
+                ngx_flag_t                daemon;
+                ngx_flag_t                master;
+
+                ngx_msec_t                timer_resolution;
+
+                ngx_int_t                 worker_processes;
+                ngx_int_t                 debug_points;
+
+                ngx_int_t                 rlimit_nofile;
+                off_t                     rlimit_core;
+
+                int                       priority;
+
+                ngx_uint_t                cpu_affinity_auto;
+                ngx_uint_t                cpu_affinity_n;
+                ngx_cpuset_t             *cpu_affinity;
+
+                char                     *username;
+                ngx_uid_t                 user;
+                ngx_gid_t                 group;
+
+                ngx_str_t                 working_directory;
+                ngx_str_t                 lock_file;
+
+                ngx_str_t                 pid;
+                ngx_str_t                 oldpid;
+
+                ngx_array_t               env;
+                char                    **environment;
+            } ngx_core_conf_t;
+
+            // events command
+            {
+                ngx_string("events"),
+                NGX_MAIN_CONF|NGX_CONF_BLOCK|NGX_CONF_NOARGS,
+                ngx_events_block,
+                0,
+                0,
+                NULL
+            }
+            // events cmd的type是NGX_MAIN_CONF,在调用ngx_event_block时第三个参数传的是
+            // conf_ctx[module->index]的地址,而ngx_events_module没有create_conf,
+            // 所以当前这个地址里保存的指针是NULL
+            ngx_events_block()
+                ngx_event_max_module = ngx_count_modules(cf->cycle, NGX_EVENT_MODULE);
+                // count的过程其实就是给每个EVENT MODULE设定ctx_index的过程
+                /*
+                    然后分配一个ngx_event_max_module个元素的指针数组*ctx,
+                    遍历EVENT MODULE,调用module的create_conf,返回结果保存到(*ctx)[module->ctx_index].
+                    最后将ctx的地址保存到conf_ctx[module->index]里
+
+                    NGX_EVENT_MODULE对我们来说就2个:
+
+                    struct ngx_event_module_t {
+                        ngx_str_t *name;
+                        void *(*create_conf)(ngx_cycle_t *cycle);
+                        char *(*init_conf)(ngx_cycle_t *cycle, void *conf);
+
+                        ngx_event_actions_t actions;
+                    }
+
+                    EVENT MODULE            create_conf                 init_conf
+                    ngx_event_core_module   ngx_event_core_create_conf  ngx_event_core_init_conf
+                    ngx_epoll_module        ngx_epoll_create_conf       ngx_epoll_init_conf
+
+                    数据结构是这样的:
+                    cycle->conf_ctx
+                    | 0                 | -> ngx_core_conf_t
+                    | 1                 |
+                    | 2                 |
+                    | 3                 | -> ngx_event_modules_ctx_ptr -> ngx_event_modules_ctx
+                    | .                 |                                 | 0 | -> ngx_event_conf_t
+                    | ngx_max_module -1 |                                 | 1 | -> ngx_epoll_conf_t
+                */
+
+                // 接下来将cf另存一份,更改cf的ctx,module_type,cmd_type,继续ngx_conf_parse events block
+                // worker_connections command
+                {
+                    ngx_string("worker_connections"),
+                    NGX_EVENT_CONF|NGX_CONF_TAKE1,
+                    ngx_event_connections,
+                    0,
+                    0,
+                    NULL
+                }
+                struct ngx_event_conf_t {
+                    ngx_uint_t    connections;
+                    ngx_uint_t    use;
+                    ngx_flag_t    multi_accept;
+                    ngx_flag_t    accept_mutex;
+                    ngx_msec_t    accept_mutex_delay;
+                    u_char       *name;
+                };
+                // ngx_epoll_module 有两个配置项,我们没有用到
+                struct ngx_epoll_conf_t {
+                    ngx_uint_t events;
+                    ugx_uint_t aio_requests;
+                };
+
+                // 然后恢复cf,遍历EVENT MODULE,如果有init_conf方法(这两个module都有),
+                // 将前边create_conf返回的conf传入init_conf(cf->cycle, (*ctx)[module->ctx_index])
+                ngx_event_core_init_conf();
+                    // 确定使用哪个event module,对我们来说,就是epoll
+                    ngx_event_conf_t {
+                        connections = 1024;
+                        use = 1; // ngx_epoll_module->ctx_index
+                        name = "epoll";
+                        multi_accept = 0;
+                        accept_mutex = 0;
+                        accept_mutex_delay = 500;
+                    }
+                ngx_epoll_init_conf();
+                    ngx_epoll_conf_t {
+                        events = 512;
+                        aio_requests = 32;
+                    }
 
             // http command
             {
@@ -524,35 +638,45 @@ cycle = ngx_init_cycle(&init_cycle);
                 0,
                 NULL
             }
+            // http cmd的type也是NGX_MAIN_CONF,在调用ngx_http_block时第三个参数传的是
+            // conf_ctx[module->index]的地址,而ngx_http_module没有create_conf,
+            // 所以当前这个地址里保存的指针是NULL
             ngx_http_block()
-                /*
-                    cycle->conf_ctx
-                        | - ngx_core_conf_t *
-                        | - void *
-                        |       | - ngx_event_conf_t
-                        |       | - ngx_epoll_conf_t
-                        | - ngx_http_conf_ctx_t *
-                */
-                typedef struct {
+                ngx_http_conf_ctx_t *ctx = ngx_pcalloc(cf->pool, sizeof(ngx_http_conf_ctx_t));
+                *conf = ctx;
+
+                struct ngx_http_conf_ctx_t {
                     void        **main_conf;
                     void        **srv_conf;
                     void        **loc_conf;
-                } ngx_http_conf_ctx_t;
-                // 遍历NGX_HTTP_MODULE,create_main_conf,create_srv_conf,create_loc_conf
-                // preconfiguration
-                // ngx_conf_parse()
-                // init_main_conf,ngx_http_merge_servers
-                // ngx_http_init_locations, ngx_http_init_static_location_trees
-                // postconfiguration
+                };
 
-    // conf_file处理完成后,调用NGX_CORE_MODULE的init_conf方法
+                ngx_http_max_module = ngx_count_modules(cf->cycle, NGX_HTTP_MODULE);
+                // 遍历的同时将http module也设定了module.ctx_index
+                ctx->mail_conf = ngx_pcalloc(cf->pool, sizeof(void *) * ngx_http_max_module);
+                ctx->srv_conf  = ...
+                ctx->loc_conf  = ...
+                // 遍历http module,调用module对应的create_main_conf, create_srv_conf, create_loc_conf
+                // 更改ctx,再次遍历,调用module->preconfiguration()
+                // 更改module_type,cmd_type,ngx_conf_parse http block
+                // 遍历http module,调用init_main_conf, ngx_http_merge_servers
+                // init locations, init static locations
+                // init phases, init headers in hash
+                // 遍历http module,调用module->postconfiguration()
+                // init vars
+                // init phase handlers
+                // optimize servers
+
+    // 从ngx_conf_parse返回后,遍历CORE MODULE,如果module有init_conf方法,调用之.
+    // 对我们来说,有两个init_conf方法
     ngx_core_module_init_conf()
         daemon = 1;
         master = 1;
         // ...
     ngx_event_init_conf()
-        // 确保有events配置
+        // 主要是确保有events配置
 
+    // 后边还有很长很长的代码
     ngx_init_modules(); // 调用module的init_module()方法
 
 
@@ -659,6 +783,232 @@ ngx_http_init_connection();
             ngx_http_process_request_headers();
                 ngx_http_process_request();
                     ngx_http_handler();
+</code></pre>
+
+<h3>stream</h3>
+<pre><code class="language-c">
+/*
+stream {
+    upstream stream_backend {
+        server 127.0.0.1:8888;
+        server 127.0.0.1:8889;
+        server 127.0.0.1:8890;
+    }
+
+    server {
+        listen 127.0.0.1:8887;
+        proxy_pass stream_backend;
+    }
+}
+*/
+
+ngx_stream_block()
+    // 1
+    foreach NGX_STREAM_MODULE
+        create_main_conf
+        create_srv_conf
+        preconfiguration
+    // 2
+    ngx_conf_parse()
+    // 3
+    foreach NGX_STREAM_MODULE
+        init_main_conf
+            main_conf[stream_upstream].upstreams[x].peer.init_upstram();
+        merge_srv_conf
+    // 4
+    ngx_stream_init_phases()
+        array_init of handlers:
+            NGX_STREAM_POST_ACCEPT_PHASE
+            NGX_STREAM_PREACCESS_PHASE
+            NGX_STREAM_ACCESS_PHASE
+            NGX_STREAM_SSL_PHASE
+            NGX_STREAM_PREREAD_PHASE
+            NGX_STREAM_LOG_PHASE
+    // 5
+    foreach NGX_STREAM_MODULE
+        postconfiguration
+            NGX_STREAM_LOG_PHASE.handlers[x] = ngx_stream_log_handler;
+            ngx_stream_top_filter = ngx_stream_write_filter;
+    // 6
+    ngx_stream_variables_init_vars();
+    // 7
+    ngx_stream_init_phase_handlers();
+        n = 1;
+        ph = ngx_pcalloc(cf->pool, n * sizeof(ngx_stream_phase_handler_t) + sizeof(void *));
+        struct ngx_stream_phase_handler_t {
+            ngx_stream_phase_handler_pt checker;
+            ngx_stream_handler_pt       handler;
+            ngx_uid_t                   next;
+        }
+        // NGX_STREAM_CONTENT_PHASE
+        cmcf->phase_engine.handlers = ph = ph[0] = {
+            checker = ngx_stream_core_content_phase;
+        }
+    // 8 合并listen项
+    ngx_stream_add_ports();
+    ngx_stream_optimize_servers();
+
+/*
+cycle->conf_ctx
+| 0 core                 | -> ngx_core_conf_t
+| 1 errlog               |
+| 2 conf                 |
+| 3 events               | -> ngx_event_modules_ctx_ptr -> ngx_event_modules_ctx
+| .                      |                                 | 0 | -> ngx_event_conf_t
+| .                      |                                 | 1 | -> ngx_epoll_conf_t
+| .                      |
+| .                      |
+| 21 stream              | -> ngx_stream_conf_ctx_t
+                                main_conf
+                                    | stream_core       | -> ngx_stream_core_main_conf_t
+                                                                servers -> array of ngx_ngx_stream_core_srv_conf_t
+                                                                    {
+                                                                        file_name              =
+                                                                        line                   =
+                                                                        resolver_timeout       = UNSET
+                                                                        proxy_protocol_timeout = UNSET
+                                                                        tcp_nodelay            = UNSET
+                                                                        preread_buffer_size    = UNSET
+                                                                        preread_timeout        = UNSET
+                                                                    }
+                                                                listen  -> array of ngx_stream_listen_t
+                                                                    {
+                                                                        sockaddr = ,
+                                                                        socklen  = ,
+                                                                        backlog  = NGX_LISTEN_BACKLOG,
+                                                                        rcvbuf   = -1,
+                                                                        sndbuf   = -1,
+                                                                        type     = SOCK_STREAM,
+                                                                        wildcard = ,
+                                                                        ctx      =
+                                                                    }
+                                                                phase_engine
+                                                                phases[NGX_STREAM_LOG_PHASE + 1] = {
+                                                                    NGX_STREAM_POST_ACCEPT_PHASE    array of handlers
+                                                                    NGX_STREAM_PREACCESS_PHASE      array of handlers
+                                                                    NGX_STREAM_ACCESS_PHASE         array of handlers
+                                                                    NGX_STREAM_SSL_PHASE            array of handlers
+                                                                    NGX_STREAM_PREREAD_PHASE        array of handlers
+                                                                    NGX_STREAM_LOG_PHASE            array of handlers
+                                                                }
+                                                                variables_hash_max_size    = 1024
+                                                                variables_hash_bucket_size = 64
+                                                                variables_keys             = NULL
+                                                                variables -> array of ngx_stream_variable_t
+                                                                prefix_variables -> array of ngx_stream_variable_t
+                                    | stream_log        | -> ngx_stream_log_main_conf_t
+                                                                formats -> array of ngX_stream_log_fmt_t
+                                    | stream_proxy      | -> NULL
+                                    | stream_upstream   | -> ngx_stream_upstream_main_conf_t
+                                                                upstreams -> array of ngx_stream_upstream_srv_conf_t
+                                                                    {
+                                                                        flags     =
+                                                                        host      = "stream_backend"
+                                                                        file_name =
+                                                                        line      =
+                                                                        port      = 0
+                                                                        no_port   = 1
+                                                                        servers -> array of ngx_stream_upstream_server_t
+                                                                            {name = "127.0.0.1:8888", addrs = , naddrs = , weight = 1, max_conns = 0, max_fails = 1, fail_timeout = 10},
+                                                                            {name = "127.0.0.1:8889", addrs = , naddrs = , weight = 1, max_conns = 0, max_fails = 1, fail_timeout = 10},
+                                                                            {name = "127.0.0.1:8890", addrs = , naddrs = , weight = 1, max_conns = 0, max_fails = 1, fail_timeout = 10}
+                                                                        peer = {
+                                                                            init_upstram
+                                                                        }
+                                                                    }
+                                srv_conf
+                                    | stream_core       | -> ngx_stream_core_srv_conf_t
+                                                                handler                = ngx_stream_proxy_handler;
+                                                                file_name              =
+                                                                line                   =
+                                                                resolver_timeout       = UNSET
+                                                                proxy_protocol_timeout = UNSET
+                                                                tcp_nodelay            = UNSET
+                                                                preread_buffer_size    = UNSET
+                                                                preread_timeout        = UNSET
+                                    | stream_log        | -> ngx_stream_log_srv_conf_t
+                                                                open_file_cache = UNSET
+                                    | stream_proxy      | -> ngx_stream_proxy_srv_conf_t
+                                                                connect_timeout       = UNSET
+                                                                timeout               = UNSET
+                                                                next_upstream_timeout = UNSET
+                                                                buffer_size           = UNSET
+                                                                upload_rate           = UNSET
+                                                                download_rate         = UNSET
+                                                                responses             = UNSET
+                                                                next_upstream_tries   = UNSET
+                                                                next_upstream         = UNSET
+                                                                proxy_protocol        = UNSET
+                                                                local                 = UNSET
+                                                                upstream              = main_conf[stream_upstream][upstreams][0]
+                                    | stream_upstream   | -> NULL
+
+| 22 stream_core         |
+| 23 stream_log          |
+| 24 stream_proxy        |
+| 25 stream_upstream     |
+| 26 stream_write_filter |
+| .                      |
+| ngx_max_module - 1     |
+
+NGX_STREAM_MODULE               preconfiguration            postconfiguration       create_main_conf            init_main_conf          create_srv_conf             merge_srv_conf
+ngx_stream_core_module          ngx_sc_preconfiguration     NULL                    ngx_sc_create_main_conf     ngx_sc_init_main_conf   ngx_sc_create_srv_conf      ngx_sc_merge_srv_conf
+ngx_stream_log_module           NULL                        ngx_stream_log_init     ngx_sl_create_main_conf     NULL                    ngx_sl_create_srv_conf      ngx_sl_merge_srv_conf
+ngx_stream_proxy_module         NULL                        NULL                    NULL                        NULL                    ngx_sp_create_srv_conf      ngx_sp_merge_srv_conf
+ngx_stream_upstream_module      ngx_su_add_variables        NULL                    ngx_su_create_main_conf     ngx_su_init_main_conf   NULL                        NULL
+ngx_stream_write_filter_module  NULL                        ngx_sw_filter_init      NULL                        NULL                    NULL                        NULL
+*/
+</code></pre>
+
+<h3>ngx_stream_init_connection(ngx_connection_t *c)</h3>
+<pre><code class="language-c">
+s = ngx_pcalloc(c->pool, sizeof(ngx_stream_session_t));
+    // s->phase_handler = 0;
+s->connection = c;
+c->read->handler = ngx_stream_session_handler;
+
+ngx_stream_session_handler();
+    ngx_stream_core_run_phases(s);
+        ph = cmcf->phase_engine.handlers; // 只有一个 ph[0].checker = ngx_stream_core_content_phase;
+        while (ph[s->phase_handler].checker) {
+            rc = ph[s->phase_handler].checker(s, &ph[s->phase_handler]);
+            if (rc == NGX_OK) {
+                return;
+            }
+        }
+
+ngx_stream_core_content_phase()
+    ngx_stream_proxy_handler(s)
+        pscf = ngx_stream_get_module_srv_conf(s, ngx_stream_proxy_module);
+        u = ngx_pcalloc(c->pool, sizeof(ngx_stream_upstream_t));
+        s->upstream = u;
+        c->write->handler = ngx_stream_proxy_downstream_handler;
+        c->read->handler = ngx_stream_proxy_downstream_handler;
+        p = ngx_pnalloc(c->pool, pscf->buffer_size);
+        u->downstream_buffer.start = p;
+        if (c->read->ready) {
+            ngx_post_event(c->read, &ngx_posted_events);
+        }
+        u->upstream = pscf->upstream; // main_conf[stream_upstream][upstreams][0]
+        u->upstream.peer.init();
+        ngx_stream_proxy_connect(s);
+
+// ngx_stream_proxy_handler新分配了一个ngx_stream_upstream_t,并将其设为session的upstream
+
+struct ngx_stream_upstream_t {
+    ngx_peer_connection_t peer; // 这个就是要连接的 backend server
+
+    ngx_buf_t downstream_buf;
+    ngx_buf_t upstream_buf;
+
+    // ...
+
+    ngx_stream_upstream_srv_conf_t *upstream = pscf->upstream; // 配置的upstream
+
+    // ...
+}
+
+// backend server 的选择就在 u->upstream.peer.init() 这里
 </code></pre>
 
 </div>
