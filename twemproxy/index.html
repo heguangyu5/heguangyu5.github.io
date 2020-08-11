@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../bootstrap-3.3.5/css/bootstrap.min.css">
+<link rel="stylesheet" href="../prism.css">
+</head>
+<body>
+<div class="container">
+
+<h1 class="page-header">twemproxy-0.4.1</h1>
+
+<h3>main</h3>
+<pre><code class="language-c">
+struct instance nci;
+
+nc_set_default_options(&nci);
+nc_get_options(argc, argv, &nci);
+
+    struct instance {
+        struct context  *ctx {
+            uint32_t        id;
+            struct conf     *cf;
+            struct stats    *stats;
+
+            struct array        pool;
+            struct event_base   *evb;
+            int                  max_timeout;
+            int                 timeout;
+
+            uint32_t    max_fd;
+            uint32_t    max_ncconn;
+            uint32_t    max_nsconn;
+        };
+
+        int     log_level       = NC_LOG_DEFAULT = LOG_NOTICE;  // -v
+        char    *log_filename   = NC_LOG_PATH    = NULL;        // -o
+
+        char    *conf_filename  = NC_CONF_PATH = "conf/nutcracker.yml";     // -c
+
+        uint16_t    stats_port      = NC_STATS_PORT     = STATS_PORT = 22222;               // -s
+        int         stats_interval  = NC_STATS_INTERVAL = STATS_INTERVAL = 30 * 1000 ms;    // -i
+        char        *stats_addr     = NC_STATS_ADDR     = STATS_ADDR = "0.0.0.0";           // -a
+
+        char    hostname[NC_MAXHOSTNAMELEN] = "xxx";
+        size_t  mbuf_chunk_size = NC_MBUF_SIZE = MBUF_SIZE = 16384 = 16k;   // -m
+
+        pid_t       pid             = -1;
+        char        *pid_filename   = NULL;     // -p
+        unsigned    pidfile:1       = 0;
+    }
+
+nc_pre_run(&nci);
+    log_init();
+    // 全局变量logger
+    struct logger {
+        char *name  = nci->log_filename;
+        int level   = nci->log_level;
+        int fd      = STDERR_FILENO or open(nci->log_filename);
+        int nerror;
+    }
+
+    nc_daemonize(dump_core = 1);
+    nci->pid = getpid();
+
+    signal_init();
+    // SIGUSER1, SIGUSER2   do nothing
+    // SIGTTIN              log_level_up
+    // SIGTTOU              log_level_down
+    // SIGHUP               reopen log file
+    // SIGINT               exit
+    // SIGSEGV              core dump
+    // SIGPIPE              SIG_IGN
+
+nc_run(&nci);
+    struct context *ctx = core_start(nci);
+    for (;;) {
+        core_loop(ctx); => event_wait(ctx->evb, ctx->timeout);
+    }
+</code></pre>
+
+<h3>core_start(nci)</h3>
+<pre><code class="language-c">
+mbuf_init();
+msg_init();
+conn_init();
+    nfree_connq = 0;
+    TAILQ_INIT(&free_connq);
+
+nci->ctx = core_ctx_create(nci);
+
+    struct context  *ctx {
+        uint32_t    id  = ++ctx_id = 1;
+
+        struct conf *cf = conf_create(nci->conf_filename);
+            struct conf {
+                char *fname = "conf/nutcracker.yml";
+                // ...
+                /*
+                    alpha:
+                      listen: 127.0.0.1:22121
+                      hash: fnv1a_64
+                      distribution: ketama
+                      auto_eject_hosts: true
+                      redis: true
+                      server_retry_timeout: 2000
+                      server_failure_limit: 1
+                      servers:
+                       - 127.0.0.1:6379:1
+
+                    beta:
+                      listen: 127.0.0.1:22122
+                      hash: fnv1a_64
+                      hash_tag: "{}"
+                      distribution: ketama
+                      auto_eject_hosts: false
+                      timeout: 400
+                      redis: true
+                      servers:
+                       - 127.0.0.1:6380:1 server1
+                       - 127.0.0.1:6381:1 server2
+                       - 127.0.0.1:6382:1 server3
+                       - 127.0.0.1:6383:1 server4
+                */
+                struct array pool;
+                    struct conf_pool {
+                        struct string name {
+                            uint32_t len,
+                            uint8_t *data
+                        };
+                        struct conf_listen listen {
+                            struct string   pname   "host:port";
+                            struct string   name    "host";
+                            int             port;
+                            mode_t          perm;
+                            struct sockinfo info;
+                            unsigned         valid:1;
+                        };
+                        hash_type_t hash;
+                        // enum: HASH_ONE_AT_A_TIME/MD5/CRC16.32/FNV164.32/HSIEH/MURMUR/JENKINS
+                        struct string hash_tag;
+                        dist_type_t distribution;
+                        // enum: DIST_KETAMA/MODULA/RANDOM
+                        int timeout;
+                        int backlog;
+                        int client_connections;
+                        // redis, redis_auth, redis_db
+                        int preconnect;
+                        int auto_eject_hosts;
+                        int server_connections;
+                        int server_retry_timeout;
+                        int server_failure_limit;
+                        struct array server;
+                            struct conf_server {
+                                struct string   pname       "host:port:weight";
+                                struct string   name        "host:port or server1/2/3/4";
+                                struct string   addrstr     "host";
+                                int             port;
+                                int             weight;
+                                struct sockinfo info;
+                                unsigned        valid:1;
+                            }
+                        unsigned valid:1;
+                    }
+                // ...
+            }
+
+        struct stats *stats = stats_create(nci->stats_port, nci->stats_addr, ...); // 略过
+
+        struct array pool;
+            server_pool_init(&ctx->pool, &ctx->cf->pool, ctx);
+            // 根据 conf_pool 构建 server_pool
+            struct server_pool {
+                uint32_t idx;           = array_idx()
+                struct context *ctx;    = ctx
+
+                struct conn     *p_conn;    = NULL
+                uint32_t        nc_conn_q;  = 0
+                struct conn_tqh c_conn_q;   = TAILQ_INIT
+
+                // 根据 conf_pool->server 构建 server_pool->server
+                struct array        server;
+                    struct server {
+                        uint32_t            idx;        = array_idx
+                        struct server_pool  *owner;     = server_pool
+
+                        struct string   pname;      = conf_server->pname;
+                        struct string   name;       = conf_server->name;
+                        struct string   addrstr;    = conf_server->addrstr;
+                        uint16_t        port;       = conf_server->port;
+                        uint32_t        weight;     = conf_server->weight;
+                        struct sockinfo info;       = memcpy conf_server->info
+
+                        uint32_t        ns_conn_q;  = 0;
+                        struct conn_tqh s_conn_q;   = TAILQ_INIT
+
+                        int64_t     next_retry;     = 0
+                        uint32_t    failure_count;  = 0
+                    }
+
+                // server_pool_run() 根据 pool->dist_type 执行对应的 update 方法
+                // struct continuum *continuum 实际上是个数组
+                // nserver_continuum 记录着这个数组的已分配大小
+                // ncontinuum 记录着这个数组已经填充使用的元素个数
+                // update方法做的事就是从pool servers中找出live server,并将live server的index加入到
+                //  *continuum数组中,更新ncontinuum的值
+                // 还有一个 dispatch 方法, 它做的事是从 *continuum 数组中选一个出来,返回server index.
+                uint32_t            ncontinuum          = 0;
+                uint32_t            nserver_continuum   = 0;
+                struct continuum    *continuum          = NULL;
+                uint32_t            nlive_server        = 0;
+                int64_t             next_rebuild        = 0;
+
+                struct string   name;       = conf_pool->name;
+                struct string   addrstr;    = conf_pool->listen.pname;
+                uint16_t        port;       = conf_pool->listen.port;
+                struct sockinfo info;       = memcpy conf_pool->listen.info;
+                mode_t          perm;       = conf_pool->listen.perm;
+
+                int             dist_type;      = conf->distribution;
+                int             key_hash_type;  = conf_pool->hash;
+                hash_t          key_hash;       = hash_algos[conf_pool->hash]; // hash_md5/crc16...
+                string string   hash_tag;       = conf_pool->hash_tag;
+
+                int             timeout;    = conf_pool->timeout;
+                int             backlog;    = conf_pool->backlog;
+                int             redis_db;
+                uint32_t        client_connections;     = conf_pool->client_connections;
+                uint32_t        server_connections;     = conf_pool->server_connections;
+                int64_t         server_retry_timeout;   = conf_pool->server_retry_timeout * 1000;
+                uint32_t        server_failure_limit;   = conf_pool->server_failure_limit;
+                struct string   redis_auth;
+                unsigned        require_auth;
+                unsigned        auto_eject_hosts:1;     = conf_pool->auto_eject_hosts;
+                unsigned        preconnect:1;           = conf_pool->preconnect;
+                unsigned        redis:1;
+            }
+
+        struct event_base   *evb = event_base_create(EVENT_SIZE=1024, &core_core);
+            struct event_base {
+                int ep;                         = epoll_create();
+                struct epoll_event *event;      = nc_calloc(EVENT_SIZE, sizeof(struct epoll_event))
+                int                 nevent;     = EVENT_SIZE
+                event_cb_t          cb;         = core_core
+            }
+        int                  max_timeout;
+        int                 timeout;
+
+        uint32_t    max_nfd;    = getrlimit(RLIMIT_NOFILE, &limit) limit.rlimit_cur
+        uint32_t    max_ncconn; = max_nfd - maxnsconn - RESERVED_FDS(32)
+        uint32_t    max_nsconn; = npool * (server_pool->server_connections * nserver + 1 pool listening socket);
+    };
+
+    proxy_each_init();
+        struct conn *conn = conn_get_proxy(server_pool);
+            conn->proxy         = 1;
+            conn->recv          = proxy_recv;
+            conn->family        = server_pool->info.family;
+            conn->addrlen       = server_pool->info.addrlen;
+            conn->addr          = &server_pool->info.addr;
+            server_pool->p_conn = conn;
+            conn->owner         = server_pool;
+        proxy_listen(server_pool->ctx, conn);
+            conn->sd = socket()
+            bind/listen/nonblocking
+            event_add_conn(ctx->evb, conn);
+                epoll_event.events = EPOLLIN | EPOLLOUT | EPOLLET
+                event.data.ptr = conn;
+                epoll_ctl(ADD, conn->sd, &epoll_event)
+                conn->send_active = 1;
+                conn->recv_active = 1;
+            event_del_out(ctx->evb, conn)
+                epoll_event.events = EPOLLIN | EPOLLET
+                event.data.ptr = conn;
+                epoll_ctl(MOD, conn->sd, &epoll_event)
+                conn->send_active = 0;
+        // 因为这是个listen socket,只需要 EPOLLIN 就好了
+<code></pre>
+
+<h3>event_wait()</h3>
+<pre><code class="language-c">
+n = epoll_wait(evb->ep, evb->event, evb->nevent, timeout);
+for (i = 0; i < n; i++) {
+    struct epoll_event *ev = &evb->event[i];
+    evb->cb(ev->data.ptr, events);
+    // proxy conn: core_core(proxy_conn, events);
+}
+
+core_core(conn, events);
+    if (events & EVENT_READ) {
+        core_recv(ctx, conn); => conn->recv();
+        // proxy_conn: proxy_recv() => proxy_accept()
+        int sd = accept(proxy_conn->sd, NULL, NULL);
+        struct conn *c = conn_get('client');
+            c->recv      = msg_recv;
+            c->recv_next = req_recv_next;
+            c->recv_done = req_recv_done;
+            c->send      = msg_send;
+            c->send_next = rsp_send_next;
+            c->send_done = rsp_send_done;
+            c->close     = client_close();
+            c->active    = client_active;
+            c->ref       = client_ref;
+            c->unref     = client_unref;
+            ncurr_cconn++;
+        c->sd = sd;
+        nc_set_nonblocking(c->sd);
+        event_add_conn(ctx->evb, c);
+        // client_conn: msg_recv() => conn->recv_next(), msg_recv_chain();
+        req_recv_next() => req_get() => msg_get()
+            msg                = _msg_get();
+            msg->owner         = client_conn;
+            msg->request       = 1;
+            msg->redis         = 0;
+            msg->parser        = memcache_parse_req;
+            msg->add_auth      = memcache_add_auth;
+            msg->fragment      = memcache_fragment;
+            msg->failure       = memcache_failure;
+            msg->pre_coalesce  = memcache_pre_coalesce;
+            msg->post_coalesce = memcache_post_coalesce;
+            conn->rmsg = msg;
+        msg_recv_chain();
+            conn_recv(); => nc_read(conn->sd, buf, size);
+            for (;;) {
+                msg_parse();
+                    msg_parsed(); => conn->recv_done(); => req_recv_done();
+                        req_forward();
+                conn->recv_next();
+            }
+    }
+    if (events & EVENT_WRITE) {
+        core_send(ctx, conn); => conn->send();
+    }
+</code></pre>
+
+<h3>req_forward()</h3>
+<pre><code class="language-c">
+uint8_t *key = msg->keys start
+struct conn *s_conn = server_pool_conn(ctx, server_pool, key, keylen);
+    server_pool_update(server_pool);
+        if (!server_pool->auto_eject_hosts) return NC_OK;
+        server_pool_run();
+    struct server *server = server_pool_server(server_pool, key, keylen);
+        uint32_t idx = server_pool_idx(server_pool, key, keylen);
+            switch (server_pool->dist_type) {
+            case DIST_KETAMA:
+                hash = server_pool_hash(server_pool, key, keylen);
+                idx  = ketama_dispatch(server_pool->continuum, server_pool->ncontinuum, hash);
+                break;
+            case DIST_MODULA:
+                hash = server_pool_hash(pool, key, keylen);
+                idx = modula_dispatch(server_pool->continuum, server_pool->ncontinuum, hash);
+                break;
+            case DIST_RANDOM:
+                idx = random_dispatch(server_pool->continuum, server_pool->ncontinuum, 0);
+                break;
+            }
+    struct conn *conn = server_conn(server);
+    server_connect();
+/*
+    OK,到此,我们知道了如果想要给twemproxy增加新的dist_type,有两个方法要实现:
+    1. new_dist_type_update() 用在 server_pool_run() 中
+    2. new_dist_type_dispatch() 用在 server_pool_idx() 中
+    前者确定了都有哪些可用的后端服务器,后者从中选择出一个给当前请求使用
+*/
+</code></pre>
+
+</div>
+<script src="../prism.js"></script>
+</body>
+</html>
